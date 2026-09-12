@@ -209,30 +209,74 @@ def move(game_state: typing.Dict) -> typing.Dict:
 
     # If we have moves that avoid head-on danger, strictly use those!
     # (If all moves are threatened, fall back to candidate_moves and hope opponent turns away)
-    final_moves = h2h_safe_moves if h2h_safe_moves else candidate_moves
+    post_h2h_moves = h2h_safe_moves if h2h_safe_moves else candidate_moves
 
     # ---------------------------------------------------------
-    # PHASE 4: FOOD SEEKING (Only among verified safe, non-trap, non-H2H moves)
+    # PHASE 4: ROYALE STORM & HAZARD AVOIDANCE (Bracket Stage)
+    # The storm deals damage every turn. Avoid hazard tiles!
+    # If forced into hazards, steer toward the center safe zone.
+    # ---------------------------------------------------------
+    hazards = game_state.get("board", {}).get("hazards", [])
+    hazard_coords = {(h["x"], h["y"]) for h in hazards}
+    center_coord = {"x": board_width // 2, "y": board_height // 2}
+
+    def get_coord_distance(a, b):
+        return abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
+
+    # 1. Check which safe moves stay completely outside the storm
+    non_hazard_moves = [
+        m for m in post_h2h_moves
+        if (future_head_positions[m]["x"], future_head_positions[m]["y"]) not in hazard_coords
+    ]
+
+    # 2. If non-hazard moves exist, strictly prefer them over hazard tiles!
+    if non_hazard_moves:
+        final_moves = non_hazard_moves
+    else:
+        # If all safe moves are in hazards (unavoidable), navigate toward the center safe zone
+        min_center_dist = min(
+            get_coord_distance(future_head_positions[m], center_coord) for m in post_h2h_moves
+        )
+        final_moves = [
+            m for m in post_h2h_moves
+            if get_coord_distance(future_head_positions[m], center_coord) == min_center_dist
+        ]
+        print(f"MOVE {game_state['turn']}: Inside storm! Steering towards center safe zone with {final_moves}")
+
+    # ---------------------------------------------------------
+    # PHASE 5: FOOD SEEKING (Only among safe, non-trap, non-H2H, storm-safe moves)
     # ---------------------------------------------------------
     my_health = game_state["you"]["health"]
     food_list = game_state["board"]["food"]
 
-    if food_list:
-        def get_distance(a, b):
-            return abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
+    # In Royale mode, avoid chasing food that is sitting deep inside the storm
+    safe_food_list = [f for f in food_list if (f["x"], f["y"]) not in hazard_coords]
+    active_food_list = safe_food_list if safe_food_list else food_list
 
+    # If currently taking storm damage or health is low (<30), prioritize escaping storm/staying alive
+    is_in_hazard = (my_head["x"], my_head["y"]) in hazard_coords
+    if is_in_hazard and my_health < 30 and non_hazard_moves:
+        # Move immediately to the safe zone!
+        escape_move = min(
+            non_hazard_moves,
+            key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
+        )
+        print(f"MOVE {game_state['turn']}: CRITICAL HEALTH ({my_health}) IN STORM! Escaping to safe zone with {escape_move}")
+        return {"move": escape_move}
+
+    if active_food_list:
         # Find the closest food item to our head
-        nearest_food = min(food_list, key=lambda f: get_distance(my_head, f))
+        nearest_food = min(active_food_list, key=lambda f: get_coord_distance(my_head, f))
 
         # Calculate distance to food for each final safe move
         min_dist_to_food = min(
-            get_distance(future_head_positions[m], nearest_food) for m in final_moves
+            get_coord_distance(future_head_positions[m], nearest_food) for m in final_moves
         )
 
         # Filter to only moves that minimize distance to nearest food
         best_food_moves = [
             m for m in final_moves
-            if get_distance(future_head_positions[m], nearest_food) == min_dist_to_food
+            if get_coord_distance(future_head_positions[m], nearest_food) == min_dist_to_food
         ]
 
         next_move = random.choice(best_food_moves)

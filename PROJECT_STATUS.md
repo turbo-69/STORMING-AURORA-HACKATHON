@@ -26,9 +26,9 @@
 
 ### 🧠 Person 1 (Bhuvan) — Logic Prompter
 - **Active Branch:** `Dev/Person1/Bhuvan`
-- **Status:** In progress (Full Standard-mode suite complete: Wall, Body, Flood-Fill, Head-to-Head, and Food-Seeking)
+- **Status:** Complete & Battle-Ready (Standard-mode Qualifying + Royale-mode Storm Awareness fully implemented)
 - **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic
-- **Latest:** Added head-to-head collision avoidance against equal/larger snakes while contesting smaller snakes. Standard-mode Qualifying logic is now complete! Next: Royale storm/hazard awareness for bracket stage.
+- **Latest:** Added Royale storm/hazard avoidance and center-zone pathing. The full 5-tier decision hierarchy (Walls -> Bodies -> Flood-Fill -> Head-to-Head -> Hazards -> Food) is live and tested. Ready for tournament play!
 
 ### 🚀 Person 2 — Deploy & Infra Owner
 - **Status:** In progress — connecting team repo to PythonAnywhere
