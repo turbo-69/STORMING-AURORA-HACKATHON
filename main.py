@@ -137,16 +137,32 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # has the most open space or chases our vacating tail!
     # ---------------------------------------------------------
     if len(safe_moves) == 0:
+        my_tail = my_body[-1]
+        my_tail_coord = (my_tail["x"], my_tail["y"])
+
+        # BUGFIX (Bug #4): only consider moves that are in-bounds, not our own
+        # neck, AND not a guaranteed-fatal collision (any snake's body) --
+        # except our own tail cell, which is handled specially below since it
+        # actually vacates this turn (unless we just ate).
         in_bounds_moves = []
         for direction, coord in future_head_positions.items():
             if 0 <= coord["x"] < board_width and 0 <= coord["y"] < board_height:
                 if coord != my_neck:
-                    in_bounds_moves.append(direction)
+                    coord_tuple = (coord["x"], coord["y"])
+                    if coord_tuple not in all_obstacles or coord_tuple == my_tail_coord:
+                        in_bounds_moves.append(direction)
+
+        if not in_bounds_moves:
+            # No non-fatal option exists at all -- true last resort, fall back
+            # to the original bounds+neck-only filter (may still be fatal).
+            in_bounds_moves = []
+            for direction, coord in future_head_positions.items():
+                if 0 <= coord["x"] < board_width and 0 <= coord["y"] < board_height:
+                    if coord != my_neck:
+                        in_bounds_moves.append(direction)
 
         if not in_bounds_moves:
             in_bounds_moves = list(future_head_positions.keys())
-
-        my_tail = my_body[-1]
 
         def calculate_escape_score(direction):
             coord = future_head_positions[direction]
@@ -270,6 +286,31 @@ def move(game_state: typing.Dict) -> typing.Dict:
                         queue.append((nx, ny, dist + 1))
         return float("inf")
 
+    # BUGFIX (Bug #5): BFS walkable distance from `start_coord` to the nearest
+    # non-hazard cell, navigating around obstacles. This replaces straight-line
+    # (Manhattan) distance-to-board-center, which ignores walls/bodies that can
+    # block the direct path and silently cost extra hazard-damage turns while
+    # "closing the distance" to a center that isn't actually reachable that way.
+    def find_hazard_escape_distance_bfs(start_coord):
+        start = (start_coord["x"], start_coord["y"])
+        if start not in hazard_coords:
+            return 0
+        visited = {start}
+        queue = [(start[0], start[1], 0)]
+        while queue:
+            cx, cy, dist = queue.pop(0)
+            if dist >= 30:
+                break
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < board_width and 0 <= ny < board_height:
+                    if (nx, ny) not in all_obstacles and (nx, ny) not in visited:
+                        if (nx, ny) not in hazard_coords:
+                            return dist + 1
+                        visited.add((nx, ny))
+                        queue.append((nx, ny, dist + 1))
+        return float("inf")
+
     # Helper to choose best move towards food among candidate moves
     def pick_food_move(moves_to_choose_from, preferred_foods):
         # 1. First see if any move immediately eats food this turn
@@ -339,12 +380,28 @@ def move(game_state: typing.Dict) -> typing.Dict:
             print(f"MOVE {game_state['turn']}: IN STORM (Health: {my_health}) - Escaping to safe zone with {best_move}")
             return {"move": best_move}
         else:
-            # All moves still in hazard: steer towards center to escape storm
-            best_move = min(
-                post_h2h_moves,
-                key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
-            )
-            print(f"MOVE {game_state['turn']}: DEEP IN STORM - Steering towards center with {best_move}")
+            # BUGFIX (Bug #5): all moves still in hazard. Previously this steered
+            # by straight-line (Manhattan) distance to the board center, which
+            # ignores obstacles blocking the direct path and can cost extra
+            # hazard-damage turns while "making progress" toward a center that
+            # isn't actually reachable that way. Use real BFS walkable distance
+            # to the nearest non-hazard cell instead.
+            escape_distances = {
+                m: find_hazard_escape_distance_bfs(future_head_positions[m])
+                for m in post_h2h_moves
+            }
+            min_escape_dist = min(escape_distances.values())
+            if min_escape_dist < float("inf"):
+                best_candidates = [m for m in post_h2h_moves if escape_distances[m] == min_escape_dist]
+                best_move = max(best_candidates, key=lambda m: space_by_move.get(m, 0))
+            else:
+                # BFS couldn't find a way out within its search radius (30 tiles) --
+                # fall back to straight-line distance to center as a last resort.
+                best_move = min(
+                    post_h2h_moves,
+                    key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
+                )
+            print(f"MOVE {game_state['turn']}: DEEP IN STORM - BFS escape route with {best_move} (dist: {escape_distances.get(best_move)})")
             return {"move": best_move}
 
     # ---------------------------------------------------------
