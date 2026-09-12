@@ -91,7 +91,55 @@ def compute_voronoi_control(
 
 
 # ---------------------------------------------------------
-# PART 1: AREA-CONTROL SCORING FUNCTION WITH EDGE/CORNER WEIGHTING
+# ROYALE HAZARD SHRINK TIMING HELPERS
+# ---------------------------------------------------------
+def get_shrink_interval(game_state: typing.Dict) -> int:
+    """
+    Checks game_state for the ruleset's 'royale.shrinkEveryNTurns' setting,
+    or defaults to assuming every 25 turns if that field isn't available.
+    """
+    ruleset = game_state.get("game", {}).get("ruleset", {})
+    if not ruleset and "ruleset" in game_state:
+        ruleset = game_state.get("ruleset", {})
+
+    settings = ruleset.get("settings", {}) if isinstance(ruleset, dict) else {}
+
+    # 1. Flat key format: "royale.shrinkEveryNTurns"
+    if "royale.shrinkEveryNTurns" in settings:
+        try:
+            return int(settings["royale.shrinkEveryNTurns"])
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Nested dict format: {"royale": {"shrinkEveryNTurns": ...}}
+    royale_settings = settings.get("royale", {})
+    if isinstance(royale_settings, dict) and "shrinkEveryNTurns" in royale_settings:
+        try:
+            return int(royale_settings["shrinkEveryNTurns"])
+        except (ValueError, TypeError):
+            pass
+
+    # Default to assuming every 25 turns
+    return 25
+
+
+def get_turns_until_shrink(game_state: typing.Dict) -> int:
+    """
+    Calculates turns remaining until the next Royale hazard shrink event:
+    1. Tracks current turn modulo the shrink interval.
+    2. Immediately after a shrink occurs, plenty of time remains before the next.
+    """
+    turn = game_state.get("turn", 0)
+    shrink_interval = get_shrink_interval(game_state)
+    if shrink_interval <= 0:
+        shrink_interval = 25
+
+    turns_into_cycle = turn % shrink_interval
+    return shrink_interval - turns_into_cycle if turns_into_cycle != 0 else shrink_interval
+
+
+# ---------------------------------------------------------
+# PART 1: AREA-CONTROL SCORING FUNCTION WITH EDGE/CORNER WEIGHTING & HAZARD-TIMING BIAS
 # ---------------------------------------------------------
 def evaluate_board_state(
     my_head: typing.Tuple[int, int],
@@ -100,13 +148,15 @@ def evaluate_board_state(
     opp_body: typing.List[typing.Tuple[int, int]],
     board_width: int,
     board_height: int,
+    turns_until_shrink: typing.Optional[int] = None,
 ) -> float:
     """
-    Given a 1v1 board state, returns a single heuristic score (higher is better for us):
-    1. For every empty tile, calculates shortest BFS distance from my head and opp head.
-    2. Tile is 'mine' if my_dist <= opp_dist (reaches faster or equal/contests), else 'theirs'.
-    3. Adds bonus for edge tiles (+0.5) and corner tiles (+1.0) because edge-control limits
-       the opponent's escape routes.
+    Given a 1v1 board state, returns a heuristic evaluation score (higher is better for us):
+    1. Area Control: BFS distance from my head vs opp head for every empty tile.
+    2. Edge/Corner Weighting: +0.5 for edge tiles, +1.0 for corner tiles (perimeter choke control).
+    3. Hazard-Timing Center Bias (Royale): When countdown to the next shrink event is close
+       (<= 10 turns), adds a scaled bonus for board positions closer to the center of the board,
+       proactively moving inward before hazards encroach from the edges.
     """
     all_obstacles = set(my_body) | set(opp_body)
 
@@ -168,7 +218,33 @@ def evaluate_board_state(
         else:
             opp_score += weight
 
-    return my_score - opp_score
+    base_score = my_score - opp_score
+
+    # Hazard-timing center bias (Royale countdown awareness)
+    # Activates when next shrink is within 10 turns; scales up as countdown gets closer to 1.
+    # Has zero effect right after a shrink (plenty of time before the next).
+    center_bonus = 0.0
+    if turns_until_shrink is not None and turns_until_shrink <= 10:
+        urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+        urgency = max(0.0, min(1.0, urgency))
+
+        center_x = (board_width - 1) / 2.0
+        center_y = (board_height - 1) / 2.0
+        max_dist = center_x + center_y
+
+        if max_dist > 0:
+            my_dist_to_center = abs(my_head[0] - center_x) + abs(my_head[1] - center_y)
+            opp_dist_to_center = abs(opp_head[0] - center_x) + abs(opp_head[1] - center_y)
+
+            # Closeness ratio in [0.0, 1.0] (1.0 at center, 0.0 at farthest corner)
+            my_closeness = (max_dist - my_dist_to_center) / max_dist
+            opp_closeness = (max_dist - opp_dist_to_center) / max_dist
+
+            # Reward proximity to center, with additional relative advantage over opponent
+            center_weight = 6.0
+            center_bonus = (my_closeness + 0.5 * (my_closeness - opp_closeness)) * center_weight * urgency
+
+    return base_score + center_bonus
 
 
 # ---------------------------------------------------------
@@ -206,10 +282,10 @@ def get_legal_sim_moves(head, body, other_body, board_width, board_height):
     return legal
 
 
-def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, pv_move=None):
+def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, pv_move=None, turns_until_shrink=None):
     """
     Orders MAX moves: Principal Variation (PV) move from previous depth first,
-    then descending by 1-ply area-control evaluation.
+    then descending by 1-ply area-control evaluation with hazard-timing awareness.
     """
     if not moves or len(moves) == 1:
         return moves
@@ -221,7 +297,7 @@ def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, p
         dx, dy = DIRECTIONS[m]
         new_head = (my_head[0] + dx, my_head[1] + dy)
         new_body = [new_head] + (my_body if new_head in food else my_body[:-1])
-        return evaluate_board_state(new_head, new_body, opp_head, opp_body, board_width, board_height)
+        return evaluate_board_state(new_head, new_body, opp_head, opp_body, board_width, board_height, turns_until_shrink=turns_until_shrink)
 
     sorted_moves = sorted(moves, key=score_move, reverse=True)
 
@@ -233,7 +309,7 @@ def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, p
     return sorted_moves
 
 
-def order_moves_min(moves, opp_body, my_body, food, board_width, board_height):
+def order_moves_min(moves, opp_body, my_body, food, board_width, board_height, turns_until_shrink=None):
     """
     Orders MIN moves: ascending by our board score (best move for opponent first).
     """
@@ -247,7 +323,7 @@ def order_moves_min(moves, opp_body, my_body, food, board_width, board_height):
         dx, dy = DIRECTIONS[m]
         new_head = (opp_head[0] + dx, opp_head[1] + dy)
         new_body = [new_head] + (opp_body if new_head in food else opp_body[:-1])
-        return evaluate_board_state(my_head, my_body, new_head, new_body, board_width, board_height)
+        return evaluate_board_state(my_head, my_body, new_head, new_body, board_width, board_height, turns_until_shrink=turns_until_shrink)
 
     return sorted(moves, key=score_move)
 
@@ -264,6 +340,7 @@ def minimax_alpha_beta(
     is_maximizing: bool,
     start_time: float,
     time_limit: float,
+    turns_until_shrink: typing.Optional[int] = None,
 ) -> float:
     """
     Minimax search with alpha-beta pruning and move ordering.
@@ -274,7 +351,8 @@ def minimax_alpha_beta(
 
     if depth == 0:
         return evaluate_board_state(
-            my_body[0], my_body, opp_body[0], opp_body, board_width, board_height
+            my_body[0], my_body, opp_body[0], opp_body, board_width, board_height,
+            turns_until_shrink=turns_until_shrink
         )
 
     my_head = my_body[0]
@@ -287,7 +365,10 @@ def minimax_alpha_beta(
             return -100000.0 + depth  # Loss: trapped/collided
 
         # Move ordering: best moves evaluated first
-        ordered_moves = order_moves_max(legal_moves, my_body, opp_body, food, board_width, board_height)
+        ordered_moves = order_moves_max(
+            legal_moves, my_body, opp_body, food, board_width, board_height,
+            turns_until_shrink=turns_until_shrink
+        )
 
         max_eval = -float("inf")
         for m in ordered_moves:
@@ -303,7 +384,8 @@ def minimax_alpha_beta(
 
             score = minimax_alpha_beta(
                 new_my_body, opp_body, new_food, board_width, board_height,
-                depth - 1, alpha, beta, False, start_time, time_limit
+                depth - 1, alpha, beta, False, start_time, time_limit,
+                turns_until_shrink=turns_until_shrink
             )
             max_eval = max(max_eval, score)
             alpha = max(alpha, score)
@@ -318,7 +400,10 @@ def minimax_alpha_beta(
             return 100000.0 - depth  # Win: opponent trapped/collided
 
         # Move ordering: opponent's best moves evaluated first
-        ordered_moves = order_moves_min(legal_moves, opp_body, my_body, food, board_width, board_height)
+        ordered_moves = order_moves_min(
+            legal_moves, opp_body, my_body, food, board_width, board_height,
+            turns_until_shrink=turns_until_shrink
+        )
 
         min_eval = float("inf")
         for m in ordered_moves:
@@ -341,7 +426,8 @@ def minimax_alpha_beta(
 
                 score = minimax_alpha_beta(
                     my_body, new_opp_body, new_food, board_width, board_height,
-                    depth - 1, alpha, beta, True, start_time, time_limit
+                    depth - 1, alpha, beta, True, start_time, time_limit,
+                    turns_until_shrink=turns_until_shrink
                 )
 
             min_eval = min(min_eval, score)
@@ -360,9 +446,10 @@ def select_best_minimax_move(
     board_height: int,
     time_limit: float = 0.200,
     max_depth: int = 10,
+    turns_until_shrink: typing.Optional[int] = None,
 ) -> typing.Tuple[str, float, int, float, typing.Dict[str, float]]:
     """
-    Iterative Deepening Minimax with Move Ordering.
+    Iterative Deepening Minimax with Move Ordering & Hazard-Timing Awareness.
     Searches depth 1, 2, 3, ... using the available time budget (target 200ms).
     Leaves a massive 300ms buffer under Battlesnake's 500ms hard limit.
     Guarantees a safe fallback move is always available.
@@ -387,7 +474,8 @@ def select_best_minimax_move(
         try:
             # Move ordering at root: PV move first, then remaining candidate moves
             ordered_moves = order_moves_max(
-                candidate_moves, my_body, opp_body, food, board_width, board_height, pv_move=pv_move
+                candidate_moves, my_body, opp_body, food, board_width, board_height,
+                pv_move=pv_move, turns_until_shrink=turns_until_shrink
             )
 
             depth_best_move = ordered_moves[0]
@@ -412,7 +500,8 @@ def select_best_minimax_move(
 
                 score = minimax_alpha_beta(
                     new_my_body, opp_body, new_food, board_width, board_height,
-                    depth - 1, alpha, beta, False, start_time, time_limit
+                    depth - 1, alpha, beta, False, start_time, time_limit,
+                    turns_until_shrink=turns_until_shrink
                 )
                 current_depth_scores[m] = score
 
@@ -665,12 +754,30 @@ def move(game_state: typing.Dict) -> typing.Dict:
                 "score": score,
             }
 
+    center_coord = {"x": board_width // 2, "y": board_height // 2}
+    shrink_interval = get_shrink_interval(game_state)
+    turns_until_shrink = get_turns_until_shrink(game_state)
+
+    if turns_until_shrink <= 10:
+        urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+        print(f"MOVE {game_state['turn']}: ROYALE SHRINK COUNTDOWN - {turns_until_shrink} turns until shrink (Interval: {shrink_interval}, Urgency: {urgency:.1f}, Proactive Center Bias Active)", flush=True)
+
     # Helper scoring key: In 1v1, prefer moves maximizing relative controlled area;
     # in multiplayer, fall back to raw single-snake reachable space.
+    # Incorporates proactive center bias when Royale shrink is approaching.
     def move_preference_key(m):
-        if is_1v1 and m in voronoi_stats:
-            return (voronoi_stats[m]["score"], voronoi_stats[m]["my_tiles"])
-        return (space_by_move.get(m, 0), 0)
+        base_score = voronoi_stats[m]["score"] if (is_1v1 and m in voronoi_stats) else space_by_move.get(m, 0)
+        tie_breaker = voronoi_stats[m]["my_tiles"] if (is_1v1 and m in voronoi_stats) else 0
+
+        if turns_until_shrink <= 10:
+            cand = future_head_positions[m]
+            dist_to_center = abs(cand["x"] - center_coord["x"]) + abs(cand["y"] - center_coord["y"])
+            max_c_dist = (board_width // 2) + (board_height // 2)
+            c_closeness = (max_c_dist - dist_to_center) / max_c_dist if max_c_dist > 0 else 1.0
+            urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+            base_score += c_closeness * 6.0 * urgency
+
+        return (base_score, tie_breaker)
 
     # ---------------------------------------------------------
     # PHASE 4 & 5: HAZARD AVOIDANCE & INTELLIGENT FOOD SEEKING
@@ -679,7 +786,6 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # ---------------------------------------------------------
     hazards = game_state.get("board", {}).get("hazards", [])
     hazard_coords = {(h["x"], h["y"]) for h in hazards}
-    center_coord = {"x": board_width // 2, "y": board_height // 2}
 
     def get_coord_distance(a, b):
         return abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
@@ -835,7 +941,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if is_1v1 and my_health > 35 and candidate_moves:
             best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
                 candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
-                board_width, board_height, time_limit=0.200
+                board_width, board_height, time_limit=0.200, turns_until_shrink=turns_until_shrink
             )
             print(f"MOVE {game_state['turn']} (1v1 NEAR STORM ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
             return {"move": best_move}
@@ -871,7 +977,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if immediate_safe_food and my_length <= opp_length:
             best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
                 immediate_safe_food, my_body_tuples, opp_body_tuples, all_food_coords,
-                board_width, board_height, time_limit=0.200
+                board_width, board_height, time_limit=0.200, turns_until_shrink=turns_until_shrink
             )
             print(f"MOVE {game_state['turn']} (1v1 GROWTH ITERATIVE MINIMAX): Eating food with {best_move} (Score: {score:.1f}, Depth: {reached_depth}, Time: {duration_ms:.1f}ms)", flush=True)
             return {"move": best_move}
@@ -879,7 +985,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         # 3. Tactical Domination: Iterative Deepening Minimax with move ordering
         best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
             candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
-            board_width, board_height, time_limit=0.200
+            board_width, board_height, time_limit=0.200, turns_until_shrink=turns_until_shrink
         )
         print(f"MOVE {game_state['turn']} (1v1 ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
         return {"move": best_move}
@@ -890,8 +996,19 @@ def move(game_state: typing.Dict) -> typing.Dict:
         print(f"MOVE {game_state['turn']}: SAFELY OUTSIDE HAZARD - Seeking food with {best_move} (Health: {my_health}, Room: {space_by_move[best_move]})")
         return {"move": best_move}
 
-    # If no food on board, wander into maximum open space
-    best_move = max(candidate_moves, key=lambda m: space_by_move[m])
+    # If no food on board, wander into maximum open space (with center bias if Royale shrink is approaching)
+    def open_space_preference(m):
+        score = float(space_by_move.get(m, 0))
+        if turns_until_shrink <= 10:
+            cand = future_head_positions[m]
+            dist_to_center = abs(cand["x"] - center_coord["x"]) + abs(cand["y"] - center_coord["y"])
+            max_c_dist = (board_width // 2) + (board_height // 2)
+            c_closeness = (max_c_dist - dist_to_center) / max_c_dist if max_c_dist > 0 else 1.0
+            urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+            score += c_closeness * 10.0 * urgency
+        return score
+
+    best_move = max(candidate_moves, key=open_space_preference)
     print(f"MOVE {game_state['turn']}: SAFELY OUTSIDE HAZARD - Wandering open space with {best_move}")
     return {"move": best_move}
 

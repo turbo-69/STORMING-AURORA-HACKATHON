@@ -26,9 +26,9 @@
 
 ### 🧠 Person 1 (Bhuvan) — Logic Prompter
 - **Active Branch:** `Dev/Person1/Bhuvan`
-- **Status:** Complete & Battle-Ready (Standard-mode Qualifying + Balanced Royale Storm Awareness + 1v1 Iterative Deepening Minimax with Move Ordering fully implemented)
+- **Status:** Complete & Battle-Ready (Standard Qualifying + Proactive Royale Hazard-Timing Awareness + 1v1 Iterative Deepening Minimax with Move Ordering fully implemented)
 - **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic & 1v1 Minimax lookahead
-- **Latest:** Upgraded 1v1 duel engine to Iterative Deepening Minimax with Move Ordering (depth 1, 2, 3, 4, 5+ progressively until time budget) and principal variation caching. Moves are ordered by area-control heuristic (PV move first) to maximize alpha-beta pruning cutoffs. Safety fallback move is continuously cached at every completed depth to eliminate any risk of timing out or returning no move. Zero timeouts or warnings in live Battlesnake CLI matches. Passed all unit test suites (`test_iterative_minimax.py`, `test_minimax.py`, `test_voronoi.py`).
+- **Latest:** Implemented Royale hazard-timing awareness in the evaluation function. The snake tracks the countdown of turns until the next shrink event (`turn % shrink_interval`), smoothly scaling a proactive center bonus as the shrink draws near (within 10 turns). Evaluated with 25 unit tests across `test_hazard_timing.py`, `test_minimax.py`, `test_iterative_minimax.py`, and `test_voronoi.py`, and verified in a live CLI Royale match with `turbo-69` securing the win. Zero timeouts or warnings.
 
 ### 🚀 Person 2 — Deploy & Infra Owner
 - **Status:** In progress — connecting team repo to PythonAnywhere
