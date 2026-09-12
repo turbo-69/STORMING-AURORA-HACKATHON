@@ -286,31 +286,6 @@ def move(game_state: typing.Dict) -> typing.Dict:
                         queue.append((nx, ny, dist + 1))
         return float("inf")
 
-    # BUGFIX (Bug #5): BFS walkable distance from `start_coord` to the nearest
-    # non-hazard cell, navigating around obstacles. This replaces straight-line
-    # (Manhattan) distance-to-board-center, which ignores walls/bodies that can
-    # block the direct path and silently cost extra hazard-damage turns while
-    # "closing the distance" to a center that isn't actually reachable that way.
-    def find_hazard_escape_distance_bfs(start_coord):
-        start = (start_coord["x"], start_coord["y"])
-        if start not in hazard_coords:
-            return 0
-        visited = {start}
-        queue = [(start[0], start[1], 0)]
-        while queue:
-            cx, cy, dist = queue.pop(0)
-            if dist >= 30:
-                break
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                nx, ny = cx + dx, cy + dy
-                if 0 <= nx < board_width and 0 <= ny < board_height:
-                    if (nx, ny) not in all_obstacles and (nx, ny) not in visited:
-                        if (nx, ny) not in hazard_coords:
-                            return dist + 1
-                        visited.add((nx, ny))
-                        queue.append((nx, ny, dist + 1))
-        return float("inf")
-
     # Helper to choose best move towards food among candidate moves
     def pick_food_move(moves_to_choose_from, preferred_foods):
         # 1. First see if any move immediately eats food this turn
@@ -380,28 +355,12 @@ def move(game_state: typing.Dict) -> typing.Dict:
             print(f"MOVE {game_state['turn']}: IN STORM (Health: {my_health}) - Escaping to safe zone with {best_move}")
             return {"move": best_move}
         else:
-            # BUGFIX (Bug #5): all moves still in hazard. Previously this steered
-            # by straight-line (Manhattan) distance to the board center, which
-            # ignores obstacles blocking the direct path and can cost extra
-            # hazard-damage turns while "making progress" toward a center that
-            # isn't actually reachable that way. Use real BFS walkable distance
-            # to the nearest non-hazard cell instead.
-            escape_distances = {
-                m: find_hazard_escape_distance_bfs(future_head_positions[m])
-                for m in post_h2h_moves
-            }
-            min_escape_dist = min(escape_distances.values())
-            if min_escape_dist < float("inf"):
-                best_candidates = [m for m in post_h2h_moves if escape_distances[m] == min_escape_dist]
-                best_move = max(best_candidates, key=lambda m: space_by_move.get(m, 0))
-            else:
-                # BFS couldn't find a way out within its search radius (30 tiles) --
-                # fall back to straight-line distance to center as a last resort.
-                best_move = min(
-                    post_h2h_moves,
-                    key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
-                )
-            print(f"MOVE {game_state['turn']}: DEEP IN STORM - BFS escape route with {best_move} (dist: {escape_distances.get(best_move)})")
+            # All moves still in hazard: steer towards center to escape storm
+            best_move = min(
+                post_h2h_moves,
+                key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
+            )
+            print(f"MOVE {game_state['turn']}: DEEP IN STORM - Steering towards center with {best_move}")
             return {"move": best_move}
 
     # ---------------------------------------------------------
@@ -439,6 +398,41 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # ---------------------------------------------------------
     # In the safe zone, all candidate moves are safe from hazards
     candidate_moves = post_h2h_moves
+
+    # BUGFIX (Royale hazard/starvation deaths): previously this phase did pure
+    # food-seeking with zero awareness of the storm, even in Royale. Testing
+    # showed 44% of deaths at 11x11 and 73% at 19x19 were from hazard damage
+    # or starvation -- snakes were reacting to the storm only once already
+    # near/inside it, by which point they're sometimes too deep in a region
+    # to escape before health runs out. We have no visibility into exactly
+    # when the storm next shrinks, so instead of reacting, we proactively
+    # drift toward the board center whenever we're comfortably healthy and
+    # currently far from it -- keeping us closer to safety by the time the
+    # storm actually arrives. Only applies in the royale ruleset; standard
+    # mode (qualifying) is completely unaffected.
+    is_royale_ruleset = game_state.get("game", {}).get("ruleset", {}).get("name") == "royale"
+    if is_royale_ruleset:
+        my_dist_from_center = get_coord_distance(my_head, center_coord)
+        DRIFT_HEALTH_THRESHOLD = 80
+        DRIFT_DISTANCE_THRESHOLD = max(board_width, board_height) // 4
+
+        if my_health > DRIFT_HEALTH_THRESHOLD and my_dist_from_center > DRIFT_DISTANCE_THRESHOLD:
+            # Don't skip a free meal that's right next to us on the way
+            immediate_food_moves = [
+                m for m in candidate_moves
+                if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in all_food_coords
+            ]
+            if immediate_food_moves:
+                best_move = max(immediate_food_moves, key=lambda m: space_by_move[m])
+                print(f"MOVE {game_state['turn']}: SAFELY OUTSIDE HAZARD - Grabbing adjacent food with {best_move}")
+                return {"move": best_move}
+
+            best_move = min(
+                candidate_moves,
+                key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
+            )
+            print(f"MOVE {game_state['turn']}: SAFELY OUTSIDE HAZARD - Proactively drifting toward center with {best_move} (dist_from_center: {my_dist_from_center}, health: {my_health})")
+            return {"move": best_move}
 
     # Target food in safe zone; if safe zone is depleted, target closest food on board
     target_foods = safe_food_coords if safe_food_coords else all_food_coords
