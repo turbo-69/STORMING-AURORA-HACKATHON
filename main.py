@@ -109,7 +109,11 @@ def move(game_state: typing.Dict) -> typing.Dict:
         for segment in opponent["body"]:
             all_obstacles.add((segment["x"], segment["y"]))
 
-    def count_reachable_space(start_coord, max_limit=30):
+    # Full board reachable space counter (no artificial 30-tile cap!)
+    def count_reachable_space(start_coord, max_limit=None):
+        if max_limit is None:
+            max_limit = board_width * board_height
+
         visited = set()
         queue = [(start_coord["x"], start_coord["y"])]
         visited.add((start_coord["x"], start_coord["y"]))
@@ -147,11 +151,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
         def calculate_escape_score(direction):
             coord = future_head_positions[direction]
             score = 0
-            # If a tile is our tail, it vacates next turn (unless we just ate), so it's the best escape!
             if coord == my_tail:
                 score += 50
-
-            # Count reachable open tiles from this direction
             score += count_reachable_space(coord, max_limit=15)
             return score
 
@@ -160,18 +161,24 @@ def move(game_state: typing.Dict) -> typing.Dict:
         return {"move": best_escape_move}
 
     # ---------------------------------------------------------
-    # PHASE 2: TRAP & DEAD-END AVOIDANCE (Flood Fill)
-    # Don't chase food into a dead-end pocket formed by our own tail!
+    # PHASE 2: REAL FLOOD-FILL & TRAP AVOIDANCE
+    # Never walk into a pocket smaller than our snake's body!
     # ---------------------------------------------------------
-    # Score each safe move by how much open room it has
+    # Count the TRUE total reachable area for every safe move
     space_by_move = {m: count_reachable_space(future_head_positions[m]) for m in safe_moves}
+    max_available_space = max(space_by_move.values())
 
-    # A move is "spacious" if it has enough room for our snake body (or at least 8 open tiles)
-    min_required_space = min(my_length, 8)
-    spacious_safe_moves = [m for m in safe_moves if space_by_move[m] >= min_required_space]
+    # A move is genuinely safe from being a trap if:
+    # 1. It has enough room to comfortably fit our entire body (>= my_length), OR
+    # 2. It has at least 70% of the maximum available space on the entire board
+    spacious_safe_moves = [
+        m for m in safe_moves
+        if space_by_move[m] >= my_length or space_by_move[m] >= (max_available_space * 0.70)
+    ]
 
-    # If some moves have plenty of room, ONLY choose from those! (Filters out tail traps)
-    candidate_moves = spacious_safe_moves if spacious_safe_moves else safe_moves
+    # Priority rule: If moves with large open space exist, STRICTLY ELIMINATE moves
+    # that lead into small shrinking pockets, even if food is in that pocket!
+    candidate_moves = spacious_safe_moves if spacious_safe_moves else [max(safe_moves, key=lambda m: space_by_move[m])]
 
     # ---------------------------------------------------------
     # PHASE 3: FOOD SEEKING (Only among verified safe, non-trap moves)
