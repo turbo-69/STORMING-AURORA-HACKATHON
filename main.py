@@ -14,6 +14,7 @@ import random
 import typing
 from collections import deque
 import time
+import os
 
 
 def compute_voronoi_control(
@@ -942,6 +943,10 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # ---------------------------------------------------------
     board_width = game_state.get("board", {}).get("width", 11)
     board_height = game_state.get("board", {}).get("height", 11)
+    my_handicap = int(os.environ.get("TEST_HANDICAP_MY_LENGTH", "0"))
+    if my_handicap > 0:
+        tail = my_body[-1]
+        my_body = list(my_body) + [tail] * my_handicap
     my_length = len(my_body)
 
     # Calculate the future coordinate for all 4 moves
@@ -969,6 +974,13 @@ def move(game_state: typing.Dict) -> typing.Dict:
 
     # 3. Prevent colliding with opponent snake bodies
     opponents = game_state.get("board", {}).get("snakes", [])
+    handicap = int(os.environ.get("TEST_HANDICAP_OPPONENT_LENGTH", "0"))
+    if handicap > 0:
+        for opp in opponents:
+            if opp.get("id") != game_state.get("you", {}).get("id") and opp.get("body"):
+                tail = opp["body"][-1]
+                opp["body"] = list(opp["body"]) + [tail] * handicap
+                opp["length"] = len(opp["body"])
     for opponent in opponents:
         for direction, future_coord in future_head_positions.items():
             if future_coord in opponent["body"]:
@@ -1123,6 +1135,18 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # Checked once per turn, clean separate mutually-exclusive branches.
     # ---------------------------------------------------------
     mode = determine_behavior_mode(my_length, alive_opponents)
+
+    turn_num = game_state.get("turn", 0)
+    opp_lengths = [len(s.get("body", [])) for s in alive_opponents]
+    max_opp_l = max(opp_lengths) if opp_lengths else 0
+    avg_opp_l = (sum(opp_lengths) / len(opp_lengths)) if opp_lengths else 0.0
+
+    if mode == "SURVIVAL":
+        print(f"Turn {turn_num}: SURVIVAL MODE ACTIVE (My Length: {my_length}, Opp Max: {max_opp_l}, Opp Avg: {avg_opp_l:.1f})", flush=True)
+    elif mode == "DOMINANCE":
+        print(f"Turn {turn_num}: DOMINANCE MODE ACTIVE (My Length: {my_length}, Opp Max: {max_opp_l}, Opp Avg: {avg_opp_l:.1f})", flush=True)
+    else:
+        print(f"Turn {turn_num}: default behavior (My Length: {my_length}, Opp Max: {max_opp_l}, Opp Avg: {avg_opp_l:.1f})", flush=True)
 
     # ---------------------------------------------------------
     # BRANCH 1: SURVIVAL MODE (Shortest or Disadvantaged Snake)
