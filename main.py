@@ -212,9 +212,9 @@ def move(game_state: typing.Dict) -> typing.Dict:
     post_h2h_moves = h2h_safe_moves if h2h_safe_moves else candidate_moves
 
     # ---------------------------------------------------------
-    # PHASE 4: ROYALE STORM & HAZARD AVOIDANCE (Bracket Stage)
-    # The storm deals damage every turn. Avoid hazard tiles!
-    # If forced into hazards, steer toward the center safe zone.
+    # PHASE 4 & 5: HAZARD AVOIDANCE & INTELLIGENT FOOD SEEKING
+    # Food seeking happens normally when safely outside hazard zones.
+    # Hazard avoidance is only prioritized when actually near or in a hazard.
     # ---------------------------------------------------------
     hazards = game_state.get("board", {}).get("hazards", [])
     hazard_coords = {(h["x"], h["y"]) for h in hazards}
@@ -223,70 +223,178 @@ def move(game_state: typing.Dict) -> typing.Dict:
     def get_coord_distance(a, b):
         return abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
 
-    # 1. Check which safe moves stay completely outside the storm
+    my_health = game_state["you"]["health"]
+    food_list = game_state["board"]["food"]
+    all_food_coords = {(f["x"], f["y"]) for f in food_list}
+    safe_food_coords = {(f["x"], f["y"]) for f in food_list if (f["x"], f["y"]) not in hazard_coords}
+
+    # Proximity checks to storm / hazard tiles
+    head_pos = (my_head["x"], my_head["y"])
+    is_in_hazard = head_pos in hazard_coords
+    is_near_hazard = any(
+        (head_pos[0] + dx, head_pos[1] + dy) in hazard_coords
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]
+    )
+    is_safely_outside = (not is_in_hazard) and (not is_near_hazard)
+
+    # Classify safe moves by hazard status
     non_hazard_moves = [
         m for m in post_h2h_moves
         if (future_head_positions[m]["x"], future_head_positions[m]["y"]) not in hazard_coords
     ]
+    hazard_moves = [
+        m for m in post_h2h_moves
+        if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in hazard_coords
+    ]
 
-    # 2. If non-hazard moves exist, strictly prefer them over hazard tiles!
-    if non_hazard_moves:
-        final_moves = non_hazard_moves
-    else:
-        # If all safe moves are in hazards (unavoidable), navigate toward the center safe zone
-        min_center_dist = min(
-            get_coord_distance(future_head_positions[m], center_coord) for m in post_h2h_moves
-        )
-        final_moves = [
+    # BFS Walkable Path Distance to Food (navigating around bodies/obstacles)
+    def find_food_distance_bfs(start_coord, target_food_coords):
+        if not target_food_coords:
+            return float("inf")
+        start = (start_coord["x"], start_coord["y"])
+        if start in target_food_coords:
+            return 0
+        visited = {start}
+        queue = [(start[0], start[1], 0)]
+        while queue:
+            cx, cy, dist = queue.pop(0)
+            if dist >= 30:
+                break
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < board_width and 0 <= ny < board_height:
+                    if (nx, ny) not in all_obstacles and (nx, ny) not in visited:
+                        if (nx, ny) in target_food_coords:
+                            return dist + 1
+                        visited.add((nx, ny))
+                        queue.append((nx, ny, dist + 1))
+        return float("inf")
+
+    # Helper to choose best move towards food among candidate moves
+    def pick_food_move(moves_to_choose_from, preferred_foods):
+        # 1. First see if any move immediately eats food this turn
+        immediate_food_moves = [
+            m for m in moves_to_choose_from
+            if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in preferred_foods
+        ]
+        if immediate_food_moves:
+            return max(immediate_food_moves, key=lambda m: space_by_move[m])
+
+        # 2. Check BFS walkable distance to nearest preferred food
+        food_distances = {
+            m: find_food_distance_bfs(future_head_positions[m], preferred_foods)
+            for m in moves_to_choose_from
+        }
+        min_bfs_dist = min(food_distances.values())
+
+        if min_bfs_dist < float("inf"):
+            best_moves = [m for m in moves_to_choose_from if food_distances[m] == min_bfs_dist]
+            return max(best_moves, key=lambda m: space_by_move[m])
+
+        # 3. If BFS can't find food within search radius, fall back to Manhattan distance
+        if preferred_foods:
+            closest_food = min(
+                preferred_foods,
+                key=lambda f: min(get_coord_distance(future_head_positions[m], {"x": f[0], "y": f[1]}) for m in moves_to_choose_from)
+            )
+            min_manhattan = min(
+                get_coord_distance(future_head_positions[m], {"x": closest_food[0], "y": closest_food[1]})
+                for m in moves_to_choose_from
+            )
+            best_moves = [
+                m for m in moves_to_choose_from
+                if get_coord_distance(future_head_positions[m], {"x": closest_food[0], "y": closest_food[1]}) == min_manhattan
+            ]
+            return max(best_moves, key=lambda m: space_by_move[m])
+
+        # 4. Fall back to largest open space
+        return max(moves_to_choose_from, key=lambda m: space_by_move[m])
+
+    # ---------------------------------------------------------
+    # CASE 1: INSIDE HAZARD (Actively taking storm damage)
+    # Primary goal: Escape to safety! But an immediate food restores 100 health.
+    # ---------------------------------------------------------
+    if is_in_hazard:
+        # Life-saver check: Eating food resets health to 100 and buys survival time
+        immediate_food = [
             m for m in post_h2h_moves
-            if get_coord_distance(future_head_positions[m], center_coord) == min_center_dist
+            if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in all_food_coords
         ]
-        print(f"MOVE {game_state['turn']}: Inside storm! Steering towards center safe zone with {final_moves}")
+        if immediate_food and my_health < 50:
+            best_move = max(immediate_food, key=lambda m: space_by_move[m])
+            print(f"MOVE {game_state['turn']}: IN STORM (Health: {my_health}) - Life-saving food eaten with {best_move}!")
+            return {"move": best_move}
+
+        # Priority: Escape storm into non-hazard safe zone
+        if non_hazard_moves:
+            # If safe food is reachable from an escape move, steer towards it
+            if safe_food_coords:
+                best_move = pick_food_move(non_hazard_moves, safe_food_coords)
+            else:
+                # Steer toward center of safe zone
+                best_move = min(
+                    non_hazard_moves,
+                    key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
+                )
+            print(f"MOVE {game_state['turn']}: IN STORM (Health: {my_health}) - Escaping to safe zone with {best_move}")
+            return {"move": best_move}
+        else:
+            # All moves still in hazard: steer towards center to escape storm
+            best_move = min(
+                post_h2h_moves,
+                key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
+            )
+            print(f"MOVE {game_state['turn']}: DEEP IN STORM - Steering towards center with {best_move}")
+            return {"move": best_move}
 
     # ---------------------------------------------------------
-    # PHASE 5: FOOD SEEKING (Only among safe, non-trap, non-H2H, storm-safe moves)
+    # CASE 2: NEAR HAZARD (On the border of the storm)
+    # Hazard avoidance is active: avoid stepping into the hazard!
+    # Exception: If critically starving (health <= 25) and an adjacent hazard tile
+    # has food, take it to reset health to 100 (+86 net health!).
     # ---------------------------------------------------------
-    my_health = game_state["you"]["health"]
-    food_list = game_state["board"]["food"]
+    if is_near_hazard:
+        candidate_moves = list(non_hazard_moves)
 
-    # In Royale mode, avoid chasing food that is sitting deep inside the storm
-    safe_food_list = [f for f in food_list if (f["x"], f["y"]) not in hazard_coords]
-    active_food_list = safe_food_list if safe_food_list else food_list
+        # Emergency starvation lifeline: If starving to death and food is on an adjacent hazard tile
+        if my_health <= 25:
+            hazard_food_moves = [
+                m for m in hazard_moves
+                if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in all_food_coords
+            ]
+            if hazard_food_moves:
+                print(f"MOVE {game_state['turn']}: CRITICAL STARVATION (Health: {my_health}) NEAR STORM - Emergency hazard food lifeline activated!")
+                candidate_moves.extend(hazard_food_moves)
 
-    # If currently taking storm damage or health is low (<30), prioritize escaping storm/staying alive
-    is_in_hazard = (my_head["x"], my_head["y"]) in hazard_coords
-    if is_in_hazard and my_health < 30 and non_hazard_moves:
-        # Move immediately to the safe zone!
-        escape_move = min(
-            non_hazard_moves,
-            key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
-        )
-        print(f"MOVE {game_state['turn']}: CRITICAL HEALTH ({my_health}) IN STORM! Escaping to safe zone with {escape_move}")
-        return {"move": escape_move}
+        # If all non-hazard moves were blocked, fall back to hazard moves heading to center
+        if not candidate_moves:
+            candidate_moves = post_h2h_moves
 
-    if active_food_list:
-        # Find the closest food item to our head
-        nearest_food = min(active_food_list, key=lambda f: get_coord_distance(my_head, f))
+        # Target safe food in safe zone; if none exists and health < 50, target any food
+        target_foods = safe_food_coords if safe_food_coords else (all_food_coords if my_health < 50 else set())
+        best_move = pick_food_move(candidate_moves, target_foods)
+        print(f"MOVE {game_state['turn']}: NEAR STORM (Health: {my_health}) - Moving safely with {best_move}")
+        return {"move": best_move}
 
-        # Calculate distance to food for each final safe move
-        min_dist_to_food = min(
-            get_coord_distance(future_head_positions[m], nearest_food) for m in final_moves
-        )
+    # ---------------------------------------------------------
+    # CASE 3: SAFELY OUTSIDE HAZARDS
+    # Food seeking happens NORMALLY without aggressive hazard deprioritization!
+    # ---------------------------------------------------------
+    # In the safe zone, all candidate moves are safe from hazards
+    candidate_moves = post_h2h_moves
 
-        # Filter to only moves that minimize distance to nearest food
-        best_food_moves = [
-            m for m in final_moves
-            if get_coord_distance(future_head_positions[m], nearest_food) == min_dist_to_food
-        ]
+    # Target food in safe zone; if safe zone is depleted, target closest food on board
+    target_foods = safe_food_coords if safe_food_coords else all_food_coords
 
-        next_move = random.choice(best_food_moves)
-        print(f"MOVE {game_state['turn']}: Safe food path to ({nearest_food['x']}, {nearest_food['y']}) with {next_move} (Health: {my_health}, Room: {space_by_move[next_move]})")
-        return {"move": next_move}
+    if target_foods:
+        best_move = pick_food_move(candidate_moves, target_foods)
+        print(f"MOVE {game_state['turn']}: SAFELY OUTSIDE HAZARD - Seeking food with {best_move} (Health: {my_health}, Room: {space_by_move[best_move]})")
+        return {"move": best_move}
 
-    # If no food, pick the move with the most open space
-    next_move = max(final_moves, key=lambda m: space_by_move[m])
-    print(f"MOVE {game_state['turn']}: Wandering safely into open space with {next_move}")
-    return {"move": next_move}
+    # If no food on board, wander into maximum open space
+    best_move = max(candidate_moves, key=lambda m: space_by_move[m])
+    print(f"MOVE {game_state['turn']}: SAFELY OUTSIDE HAZARD - Wandering open space with {best_move}")
+    return {"move": best_move}
 
 
 # Start server when `python main.py` is run

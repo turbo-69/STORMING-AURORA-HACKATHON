@@ -26,9 +26,9 @@
 
 ### 🧠 Person 1 (Bhuvan) — Logic Prompter
 - **Active Branch:** `Dev/Person1/Bhuvan`
-- **Status:** Complete & Battle-Ready (Standard-mode Qualifying + Royale-mode Storm Awareness fully implemented)
+- **Status:** Complete & Battle-Ready (Standard-mode Qualifying + Balanced Royale-mode Storm Awareness & Food Navigation fully implemented)
 - **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic
-- **Latest:** Added Royale storm/hazard avoidance and center-zone pathing. The full 5-tier decision hierarchy (Walls -> Bodies -> Flood-Fill -> Head-to-Head -> Hazards -> Food) is live and tested. Ready for tournament play!
+- **Latest:** Tuned Royale storm hazard vs. food seeking logic. Fixed an issue where the snake overly avoided food in Royale mode by classifying hazard proximity (safely outside vs. near vs. inside hazards). Food seeking now operates at full normal priority when safe outside the storm using BFS obstacle-avoiding pathfinding, preventing starvation. Also introduced emergency hazard-food lifelines when health is critical. Tested in 19×19 Royale mode with 180+ turns of survival.
 
 ### 🚀 Person 2 — Deploy & Infra Owner
 - **Status:** In progress — connecting team repo to PythonAnywhere
