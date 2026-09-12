@@ -837,13 +837,13 @@ def move(game_state: typing.Dict) -> typing.Dict:
                 candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
                 board_width, board_height, time_limit=0.200
             )
-            print(f"MOVE {game_state['turn']} (1v1 NEAR STORM ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})")
+            print(f"MOVE {game_state['turn']} (1v1 NEAR STORM ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
             return {"move": best_move}
 
         # Target safe food in safe zone; if none exists and health < 50, target any food
         target_foods = safe_food_coords if safe_food_coords else (all_food_coords if my_health < 50 else set())
         best_move = pick_food_move(candidate_moves, target_foods)
-        print(f"MOVE {game_state['turn']}: NEAR STORM (Health: {my_health}) - Moving safely with {best_move}")
+        print(f"MOVE {game_state['turn']}: NEAR STORM (Health: {my_health}) - Moving safely with {best_move}", flush=True)
         return {"move": best_move}
 
     # ---------------------------------------------------------
@@ -860,7 +860,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if my_health <= 35 and target_foods:
             best_move = pick_food_move(candidate_moves, target_foods)
             stats = voronoi_stats.get(best_move, {})
-            print(f"MOVE {game_state['turn']} (1v1 HUNGRY): Seeking food with {best_move} (Health: {my_health})")
+            print(f"MOVE {game_state['turn']} (1v1 HUNGRY): Seeking food with {best_move} (Health: {my_health})", flush=True)
             return {"move": best_move}
 
         # 2. Opportunistic growth: If adjacent safe food exists and we are equal/shorter than opponent
@@ -873,7 +873,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
                 immediate_safe_food, my_body_tuples, opp_body_tuples, all_food_coords,
                 board_width, board_height, time_limit=0.200
             )
-            print(f"MOVE {game_state['turn']} (1v1 GROWTH ITERATIVE MINIMAX): Eating food with {best_move} (Score: {score:.1f}, Depth: {reached_depth}, Time: {duration_ms:.1f}ms)")
+            print(f"MOVE {game_state['turn']} (1v1 GROWTH ITERATIVE MINIMAX): Eating food with {best_move} (Score: {score:.1f}, Depth: {reached_depth}, Time: {duration_ms:.1f}ms)", flush=True)
             return {"move": best_move}
 
         # 3. Tactical Domination: Iterative Deepening Minimax with move ordering
@@ -881,7 +881,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
             candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
             board_width, board_height, time_limit=0.200
         )
-        print(f"MOVE {game_state['turn']} (1v1 ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})")
+        print(f"MOVE {game_state['turn']} (1v1 ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
         return {"move": best_move}
 
     # MULTI-SNAKE LOGIC (Standard qualifying round with > 1 opponent)
