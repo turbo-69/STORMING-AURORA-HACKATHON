@@ -223,28 +223,21 @@ def evaluate_board_state(
     # Hazard-timing center bias (Royale countdown awareness)
     # Activates when next shrink is within 10 turns; scales up as countdown gets closer to 1.
     # Has zero effect right after a shrink (plenty of time before the next).
-    center_bonus = 0.0
     if turns_until_shrink is not None and turns_until_shrink <= 10:
         urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
-        urgency = max(0.0, min(1.0, urgency))
-
-        center_x = (board_width - 1) / 2.0
-        center_y = (board_height - 1) / 2.0
+        center_x = (board_width - 1) * 0.5
+        center_y = (board_height - 1) * 0.5
         max_dist = center_x + center_y
 
         if max_dist > 0:
             my_dist_to_center = abs(my_head[0] - center_x) + abs(my_head[1] - center_y)
             opp_dist_to_center = abs(opp_head[0] - center_x) + abs(opp_head[1] - center_y)
+            inv_max = 1.0 / max_dist
+            my_closeness = (max_dist - my_dist_to_center) * inv_max
+            opp_closeness = (max_dist - opp_dist_to_center) * inv_max
+            return base_score + (my_closeness + 0.5 * (my_closeness - opp_closeness)) * (6.0 * urgency)
 
-            # Closeness ratio in [0.0, 1.0] (1.0 at center, 0.0 at farthest corner)
-            my_closeness = (max_dist - my_dist_to_center) / max_dist
-            opp_closeness = (max_dist - opp_dist_to_center) / max_dist
-
-            # Reward proximity to center, with additional relative advantage over opponent
-            center_weight = 6.0
-            center_bonus = (my_closeness + 0.5 * (my_closeness - opp_closeness)) * center_weight * urgency
-
-    return base_score + center_bonus
+    return base_score
 
 
 # ---------------------------------------------------------
@@ -444,14 +437,14 @@ def select_best_minimax_move(
     food: typing.Set[typing.Tuple[int, int]],
     board_width: int,
     board_height: int,
-    time_limit: float = 0.200,
+    time_limit: float = 0.140,
     max_depth: int = 10,
     turns_until_shrink: typing.Optional[int] = None,
 ) -> typing.Tuple[str, float, int, float, typing.Dict[str, float]]:
     """
     Iterative Deepening Minimax with Move Ordering & Hazard-Timing Awareness.
-    Searches depth 1, 2, 3, ... using the available time budget (target 200ms).
-    Leaves a massive 300ms buffer under Battlesnake's 500ms hard limit.
+    Searches depth 1, 2, 3, ... using the available time budget (target 140ms).
+    Leaves an enormous 360ms buffer under Battlesnake's 500ms hard limit.
     Guarantees a safe fallback move is always available.
     Returns: (best_move, best_score, reached_depth, duration_ms, scores_by_move)
     """
@@ -467,8 +460,10 @@ def select_best_minimax_move(
 
     for depth in range(1, max_depth + 1):
         elapsed = time.perf_counter() - start_time
-        # If elapsed exceeds 40% of time limit or >90ms, do not risk starting next depth
-        if elapsed > time_limit * 0.40 or elapsed > 0.090:
+        # Conservative depth-break safeguard:
+        # Each minimax ply typically increases search time by ~2.5x to 3x.
+        # If elapsed exceeds 55ms (or 35% of time_limit), do not risk starting next depth.
+        if elapsed > 0.055 or elapsed > (time_limit * 0.35):
             break
 
         try:
@@ -941,7 +936,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if is_1v1 and my_health > 35 and candidate_moves:
             best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
                 candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
-                board_width, board_height, time_limit=0.200, turns_until_shrink=turns_until_shrink
+                board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink
             )
             print(f"MOVE {game_state['turn']} (1v1 NEAR STORM ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
             return {"move": best_move}
@@ -977,7 +972,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if immediate_safe_food and my_length <= opp_length:
             best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
                 immediate_safe_food, my_body_tuples, opp_body_tuples, all_food_coords,
-                board_width, board_height, time_limit=0.200, turns_until_shrink=turns_until_shrink
+                board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink
             )
             print(f"MOVE {game_state['turn']} (1v1 GROWTH ITERATIVE MINIMAX): Eating food with {best_move} (Score: {score:.1f}, Depth: {reached_depth}, Time: {duration_ms:.1f}ms)", flush=True)
             return {"move": best_move}
@@ -985,7 +980,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         # 3. Tactical Domination: Iterative Deepening Minimax with move ordering
         best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
             candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
-            board_width, board_height, time_limit=0.200, turns_until_shrink=turns_until_shrink
+            board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink
         )
         print(f"MOVE {game_state['turn']} (1v1 ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
         return {"move": best_move}
