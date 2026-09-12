@@ -62,10 +62,24 @@ def move(game_state: typing.Dict) -> typing.Dict:
     elif my_neck["y"] > my_head["y"]:  # Neck is above head, don't move up
         is_move_safe["up"] = False
 
-    # Step 1 - Prevent your Battlesnake from moving out of bounds (off the board edge)
+    # ---------------------------------------------------------
+    # PHASE 1: STRICT SAFETY FILTER (Walls, Neck, Bodies)
+    # Safety must ALWAYS come first!
+    # ---------------------------------------------------------
     board_width = game_state["board"]["width"]
     board_height = game_state["board"]["height"]
+    my_body = game_state["you"]["body"]
+    my_length = len(my_body)
 
+    # Calculate the future coordinate for all 4 moves
+    future_head_positions = {
+        "up": {"x": my_head["x"], "y": my_head["y"] + 1},
+        "down": {"x": my_head["x"], "y": my_head["y"] - 1},
+        "left": {"x": my_head["x"] - 1, "y": my_head["y"]},
+        "right": {"x": my_head["x"] + 1, "y": my_head["y"]},
+    }
+
+    # 1. Prevent moving out of bounds (off the board edge)
     if my_head["x"] == 0:
         is_move_safe["left"] = False
     if my_head["x"] == board_width - 1:
@@ -75,72 +89,99 @@ def move(game_state: typing.Dict) -> typing.Dict:
     if my_head["y"] == board_height - 1:
         is_move_safe["up"] = False
 
-    # Step 2 - Prevent your Battlesnake from colliding with its own body
-    my_body = game_state["you"]["body"]
-    
-    # Calculate what coordinate each move would put the head in
-    future_head_positions = {
-        "up": {"x": my_head["x"], "y": my_head["y"] + 1},
-        "down": {"x": my_head["x"], "y": my_head["y"] - 1},
-        "left": {"x": my_head["x"] - 1, "y": my_head["y"]},
-        "right": {"x": my_head["x"] + 1, "y": my_head["y"]},
-    }
-
-    # If a future position hits any segment of our body, mark it unsafe
+    # 2. Prevent colliding with our own body
     for direction, future_coord in future_head_positions.items():
         if future_coord in my_body:
             is_move_safe[direction] = False
 
-    # Step 3 - Prevent your Battlesnake from colliding with other Battlesnakes
+    # 3. Prevent colliding with opponent snake bodies
     opponents = game_state["board"]["snakes"]
     for opponent in opponents:
-        # Check against every segment of the opponent's body
         for direction, future_coord in future_head_positions.items():
             if future_coord in opponent["body"]:
                 is_move_safe[direction] = False
 
-    # Are there any safe moves left?
-    safe_moves = []
-    for move, isSafe in is_move_safe.items():
-        if isSafe:
-            safe_moves.append(move)
+    # Collect only the moves that are 100% physically safe this turn
+    safe_moves = [direction for direction, is_safe in is_move_safe.items() if is_safe]
 
+    # EMERGENCY: If completely boxed in, pick any in-bounds direction
     if len(safe_moves) == 0:
-        print(f"MOVE {game_state['turn']}: No safe moves detected! Moving down")
-        return {"move": "down"}
+        in_bounds_moves = []
+        for direction, coord in future_head_positions.items():
+            if 0 <= coord["x"] < board_width and 0 <= coord["y"] < board_height:
+                in_bounds_moves.append(direction)
+        fallback = random.choice(in_bounds_moves) if in_bounds_moves else "down"
+        print(f"MOVE {game_state['turn']}: TRAPPED! No safe moves left. Emergency fallback: {fallback}")
+        return {"move": fallback}
 
-    # Step 4 - Food Seeking (Only choosing from already verified safe_moves)
+    # ---------------------------------------------------------
+    # PHASE 2: TRAP & DEAD-END AVOIDANCE (Flood Fill)
+    # Don't chase food into a dead-end pocket formed by our own tail!
+    # ---------------------------------------------------------
+    # Build a fast lookup set of all obstacle coordinates (our body + opponents)
+    all_obstacles = set()
+    for segment in my_body:
+        all_obstacles.add((segment["x"], segment["y"]))
+    for opponent in opponents:
+        for segment in opponent["body"]:
+            all_obstacles.add((segment["x"], segment["y"]))
+
+    def count_reachable_space(start_coord, max_limit=30):
+        visited = set()
+        queue = [(start_coord["x"], start_coord["y"])]
+        visited.add((start_coord["x"], start_coord["y"]))
+
+        while queue and len(visited) < max_limit:
+            cx, cy = queue.pop(0)
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < board_width and 0 <= ny < board_height:
+                    if (nx, ny) not in all_obstacles and (nx, ny) not in visited:
+                        visited.add((nx, ny))
+                        queue.append((nx, ny))
+        return len(visited)
+
+    # Score each safe move by how much open room it has
+    space_by_move = {m: count_reachable_space(future_head_positions[m]) for m in safe_moves}
+
+    # A move is "spacious" if it has enough room for our snake body (or at least 8 open tiles)
+    min_required_space = min(my_length, 8)
+    spacious_safe_moves = [m for m in safe_moves if space_by_move[m] >= min_required_space]
+
+    # If some moves have plenty of room, ONLY choose from those! (Filters out tail traps)
+    candidate_moves = spacious_safe_moves if spacious_safe_moves else safe_moves
+
+    # ---------------------------------------------------------
+    # PHASE 3: FOOD SEEKING (Only among verified safe, non-trap moves)
+    # ---------------------------------------------------------
     my_health = game_state["you"]["health"]
     food_list = game_state["board"]["food"]
 
-    # If food exists on the board, prioritize the safe move that brings us closest to food
     if food_list:
-        # Helper: Calculate distance between two coordinates
         def get_distance(a, b):
             return abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
 
-        # Find the single closest food item to our current head
+        # Find the closest food item to our head
         nearest_food = min(food_list, key=lambda f: get_distance(my_head, f))
 
-        # Calculate the distance to nearest_food for each safe move
-        min_distance = min(
-            get_distance(future_head_positions[m], nearest_food) for m in safe_moves
+        # Calculate distance to food for each candidate move
+        min_dist_to_food = min(
+            get_distance(future_head_positions[m], nearest_food) for m in candidate_moves
         )
 
-        # Collect all safe moves that achieve this best (smallest) distance to food
+        # Filter candidate moves to only those that minimize distance to nearest food
         best_food_moves = [
-            m for m in safe_moves
-            if get_distance(future_head_positions[m], nearest_food) == min_distance
+            m for m in candidate_moves
+            if get_distance(future_head_positions[m], nearest_food) == min_dist_to_food
         ]
 
-        # Pick among the best food moves (if tied, e.g. both 'up' and 'right' get closer)
         next_move = random.choice(best_food_moves)
-        print(f"MOVE {game_state['turn']}: Targeting nearest food at ({nearest_food['x']}, {nearest_food['y']}) with {next_move} (Health: {my_health})")
+        print(f"MOVE {game_state['turn']}: Safe food path to ({nearest_food['x']}, {nearest_food['y']}) with {next_move} (Health: {my_health}, Room: {space_by_move[next_move]})")
         return {"move": next_move}
 
-    # If there is no food on the board, pick randomly among safe moves
-    next_move = random.choice(safe_moves)
-    print(f"MOVE {game_state['turn']}: No food on board. Wandering safely with {next_move}")
+    # If no food, pick the candidate move with the most open space
+    next_move = max(candidate_moves, key=lambda m: space_by_move[m])
+    print(f"MOVE {game_state['turn']}: Wandering safely into open space with {next_move}")
     return {"move": next_move}
 
 
