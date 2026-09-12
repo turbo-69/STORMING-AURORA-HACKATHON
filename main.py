@@ -662,8 +662,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # PHASE 1: STRICT SAFETY FILTER (Walls, Neck, Bodies)
     # Safety must ALWAYS come first!
     # ---------------------------------------------------------
-    board_width = game_state["board"]["width"]
-    board_height = game_state["board"]["height"]
+    board_width = game_state.get("board", {}).get("width", 11)
+    board_height = game_state.get("board", {}).get("height", 11)
     my_body = game_state["you"]["body"]
     my_length = len(my_body)
 
@@ -705,17 +705,17 @@ def move(game_state: typing.Dict) -> typing.Dict:
         for segment in opponent["body"]:
             all_obstacles.add((segment["x"], segment["y"]))
 
-    # Full board reachable space counter (no artificial 30-tile cap!)
+    # Full board reachable space counter (dynamic for any board dimensions)
     def count_reachable_space(start_coord, max_limit=None):
         if max_limit is None:
             max_limit = board_width * board_height
 
-        visited = set()
-        queue = [(start_coord["x"], start_coord["y"])]
-        visited.add((start_coord["x"], start_coord["y"]))
+        start_tuple = (start_coord["x"], start_coord["y"])
+        visited = {start_tuple}
+        queue = deque([start_tuple])
 
         while queue and len(visited) < max_limit:
-            cx, cy = queue.pop(0)
+            cx, cy = queue.popleft()
             for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 nx, ny = cx + dx, cy + dy
                 if 0 <= nx < board_width and 0 <= ny < board_height:
@@ -901,7 +901,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in hazard_coords
     ]
 
-    # BFS Walkable Path Distance to Food (navigating around bodies/obstacles)
+    # BFS Walkable Path Distance to Food (navigating around bodies/obstacles, dynamic for any board size)
     def find_food_distance_bfs(start_coord, target_food_coords):
         if not target_food_coords:
             return float("inf")
@@ -909,10 +909,11 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if start in target_food_coords:
             return 0
         visited = {start}
-        queue = [(start[0], start[1], 0)]
+        queue = deque([(start[0], start[1], 0)])
+        max_search_dist = board_width + board_height
         while queue:
-            cx, cy, dist = queue.pop(0)
-            if dist >= 30:
+            cx, cy, dist = queue.popleft()
+            if dist >= max_search_dist:
                 break
             for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 nx, ny = cx + dx, cy + dy
