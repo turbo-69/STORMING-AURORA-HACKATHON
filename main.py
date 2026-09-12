@@ -139,6 +139,71 @@ def get_turns_until_shrink(game_state: typing.Dict) -> int:
 
 
 # ---------------------------------------------------------
+# OPPONENT MODELING (PERSISTENT TRACKER)
+# ---------------------------------------------------------
+# Stores up to 5 turns of opponent movement history per game
+OPPONENT_TRACKER: typing.Dict[str, typing.Any] = {
+    "game_id": None,
+    "last_opp_head": None,
+    "last_food": [],
+    "recent_moves": deque(maxlen=5),  # boolean: True if move was towards nearest food
+}
+
+
+def reset_opponent_tracker(game_id: typing.Optional[str] = None):
+    """Safely resets or re-initializes the opponent tracker."""
+    OPPONENT_TRACKER["game_id"] = game_id
+    OPPONENT_TRACKER["last_opp_head"] = None
+    OPPONENT_TRACKER["last_food"] = []
+    OPPONENT_TRACKER["recent_moves"].clear()
+
+
+def update_opponent_tracker(
+    game_state: typing.Dict,
+    opp_head: typing.Optional[typing.Tuple[int, int]],
+    current_food: typing.Optional[typing.List[typing.Tuple[int, int]]],
+) -> bool:
+    """
+    Tracks opponent movement relative to food over the last 4-5 turns.
+    Returns True if the opponent exhibits a naive/greedy food-chasing pattern.
+    Fails safely back to False on ANY unexpected data or exception.
+    """
+    try:
+        if not opp_head or current_food is None:
+            return False
+
+        current_game_id = game_state.get("game", {}).get("id")
+        if OPPONENT_TRACKER["game_id"] != current_game_id:
+            reset_opponent_tracker(current_game_id)
+
+        last_head = OPPONENT_TRACKER["last_opp_head"]
+        last_food = OPPONENT_TRACKER["last_food"]
+
+        if last_head is not None and last_food:
+            # Measure distance from previous head to nearest food on that turn
+            prev_min_dist = min(abs(last_head[0] - fx) + abs(last_head[1] - fy) for fx, fy in last_food)
+            # Measure distance from new head to that same food
+            new_min_dist = min(abs(opp_head[0] - fx) + abs(opp_head[1] - fy) for fx, fy in last_food)
+
+            # Did opponent step closer to food or eat food?
+            moved_towards_food = (new_min_dist < prev_min_dist or opp_head in last_food)
+            OPPONENT_TRACKER["recent_moves"].append(moved_towards_food)
+
+        # Update last known state for next turn
+        OPPONENT_TRACKER["last_opp_head"] = opp_head
+        OPPONENT_TRACKER["last_food"] = list(current_food)
+
+        # Naive check: At least 3 observed moves, and >= 75% of them were direct food-chasing
+        moves = list(OPPONENT_TRACKER["recent_moves"])
+        if len(moves) >= 3 and (sum(moves) / len(moves)) >= 0.75:
+            return True
+        return False
+    except Exception:
+        # 100% fail-safe fallback
+        return False
+
+
+# ---------------------------------------------------------
 # PART 1: AREA-CONTROL SCORING FUNCTION WITH EDGE/CORNER WEIGHTING & HAZARD-TIMING BIAS
 # ---------------------------------------------------------
 def evaluate_board_state(
@@ -149,14 +214,16 @@ def evaluate_board_state(
     board_width: int,
     board_height: int,
     turns_until_shrink: typing.Optional[int] = None,
+    opp_is_naive: bool = False,
 ) -> float:
     """
     Given a 1v1 board state, returns a heuristic evaluation score (higher is better for us):
     1. Area Control: BFS distance from my head vs opp head for every empty tile.
     2. Edge/Corner Weighting: +0.5 for edge tiles, +1.0 for corner tiles (perimeter choke control).
     3. Hazard-Timing Center Bias (Royale): When countdown to the next shrink event is close
-       (<= 10 turns), adds a scaled bonus for board positions closer to the center of the board,
-       proactively moving inward before hazards encroach from the edges.
+       (<= 10 turns), adds a scaled bonus for board positions closer to the center of the board.
+    4. Opponent Modeling: If opponent exhibits naive food-chasing, applies an aggression multiplier
+       and territorial squeeze bonus to punish predictable play.
     """
     all_obstacles = set(my_body) | set(opp_body)
 
@@ -220,6 +287,15 @@ def evaluate_board_state(
 
     base_score = my_score - opp_score
 
+    # Opponent modeling: If opponent is naive, apply small aggression multiplier to positive advantage
+    if opp_is_naive and base_score > 0:
+        base_score *= 1.15
+        if len(my_body) >= len(opp_body):
+            dist_to_opp = abs(my_head[0] - opp_head[0]) + abs(my_head[1] - opp_head[1])
+            max_d = board_width + board_height
+            if max_d > 0:
+                base_score += ((max_d - dist_to_opp) / max_d) * 3.0
+
     # Hazard-timing center bias (Royale countdown awareness)
     # Activates when next shrink is within 10 turns; scales up as countdown gets closer to 1.
     # Has zero effect right after a shrink (plenty of time before the next).
@@ -275,7 +351,7 @@ def get_legal_sim_moves(head, body, other_body, board_width, board_height):
     return legal
 
 
-def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, pv_move=None, turns_until_shrink=None):
+def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, pv_move=None, turns_until_shrink=None, opp_is_naive=False):
     """
     Orders MAX moves: Principal Variation (PV) move from previous depth first,
     then descending by 1-ply area-control evaluation with hazard-timing awareness.
@@ -290,7 +366,10 @@ def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, p
         dx, dy = DIRECTIONS[m]
         new_head = (my_head[0] + dx, my_head[1] + dy)
         new_body = [new_head] + (my_body if new_head in food else my_body[:-1])
-        return evaluate_board_state(new_head, new_body, opp_head, opp_body, board_width, board_height, turns_until_shrink=turns_until_shrink)
+        return evaluate_board_state(
+            new_head, new_body, opp_head, opp_body, board_width, board_height,
+            turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
+        )
 
     sorted_moves = sorted(moves, key=score_move, reverse=True)
 
@@ -302,7 +381,7 @@ def order_moves_max(moves, my_body, opp_body, food, board_width, board_height, p
     return sorted_moves
 
 
-def order_moves_min(moves, opp_body, my_body, food, board_width, board_height, turns_until_shrink=None):
+def order_moves_min(moves, opp_body, my_body, food, board_width, board_height, turns_until_shrink=None, opp_is_naive=False):
     """
     Orders MIN moves: ascending by our board score (best move for opponent first).
     """
@@ -316,7 +395,10 @@ def order_moves_min(moves, opp_body, my_body, food, board_width, board_height, t
         dx, dy = DIRECTIONS[m]
         new_head = (opp_head[0] + dx, opp_head[1] + dy)
         new_body = [new_head] + (opp_body if new_head in food else opp_body[:-1])
-        return evaluate_board_state(my_head, my_body, new_head, new_body, board_width, board_height, turns_until_shrink=turns_until_shrink)
+        return evaluate_board_state(
+            my_head, my_body, new_head, new_body, board_width, board_height,
+            turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
+        )
 
     return sorted(moves, key=score_move)
 
@@ -334,6 +416,7 @@ def minimax_alpha_beta(
     start_time: float,
     time_limit: float,
     turns_until_shrink: typing.Optional[int] = None,
+    opp_is_naive: bool = False,
 ) -> float:
     """
     Minimax search with alpha-beta pruning and move ordering.
@@ -345,7 +428,7 @@ def minimax_alpha_beta(
     if depth == 0:
         return evaluate_board_state(
             my_body[0], my_body, opp_body[0], opp_body, board_width, board_height,
-            turns_until_shrink=turns_until_shrink
+            turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
         )
 
     my_head = my_body[0]
@@ -360,7 +443,7 @@ def minimax_alpha_beta(
         # Move ordering: best moves evaluated first
         ordered_moves = order_moves_max(
             legal_moves, my_body, opp_body, food, board_width, board_height,
-            turns_until_shrink=turns_until_shrink
+            turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
         )
 
         max_eval = -float("inf")
@@ -378,7 +461,7 @@ def minimax_alpha_beta(
             score = minimax_alpha_beta(
                 new_my_body, opp_body, new_food, board_width, board_height,
                 depth - 1, alpha, beta, False, start_time, time_limit,
-                turns_until_shrink=turns_until_shrink
+                turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
             )
             max_eval = max(max_eval, score)
             alpha = max(alpha, score)
@@ -395,7 +478,7 @@ def minimax_alpha_beta(
         # Move ordering: opponent's best moves evaluated first
         ordered_moves = order_moves_min(
             legal_moves, opp_body, my_body, food, board_width, board_height,
-            turns_until_shrink=turns_until_shrink
+            turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
         )
 
         min_eval = float("inf")
@@ -420,7 +503,7 @@ def minimax_alpha_beta(
                 score = minimax_alpha_beta(
                     my_body, new_opp_body, new_food, board_width, board_height,
                     depth - 1, alpha, beta, True, start_time, time_limit,
-                    turns_until_shrink=turns_until_shrink
+                    turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
                 )
 
             min_eval = min(min_eval, score)
@@ -440,6 +523,7 @@ def select_best_minimax_move(
     time_limit: float = 0.140,
     max_depth: int = 10,
     turns_until_shrink: typing.Optional[int] = None,
+    opp_is_naive: bool = False,
 ) -> typing.Tuple[str, float, int, float, typing.Dict[str, float]]:
     """
     Iterative Deepening Minimax with Move Ordering & Hazard-Timing Awareness.
@@ -470,7 +554,7 @@ def select_best_minimax_move(
             # Move ordering at root: PV move first, then remaining candidate moves
             ordered_moves = order_moves_max(
                 candidate_moves, my_body, opp_body, food, board_width, board_height,
-                pv_move=pv_move, turns_until_shrink=turns_until_shrink
+                pv_move=pv_move, turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
             )
 
             depth_best_move = ordered_moves[0]
@@ -496,7 +580,7 @@ def select_best_minimax_move(
                 score = minimax_alpha_beta(
                     new_my_body, opp_body, new_food, board_width, board_height,
                     depth - 1, alpha, beta, False, start_time, time_limit,
-                    turns_until_shrink=turns_until_shrink
+                    turns_until_shrink=turns_until_shrink, opp_is_naive=opp_is_naive
                 )
                 current_depth_scores[m] = score
 
@@ -541,11 +625,13 @@ def info() -> typing.Dict:
 
 # start is called when your Battlesnake begins a game
 def start(game_state: typing.Dict):
+    reset_opponent_tracker(game_state.get("game", {}).get("id"))
     print("GAME START")
 
 
 # end is called when your Battlesnake finishes a game
 def end(game_state: typing.Dict):
+    reset_opponent_tracker()
     print("GAME OVER\n")
 
 
@@ -732,6 +818,12 @@ def move(game_state: typing.Dict) -> typing.Dict:
     is_1v1 = (len(alive_opponents) == 1)
     opp_snake = alive_opponents[0] if is_1v1 else None
     opp_head = opp_snake["body"][0] if is_1v1 else None
+
+    opp_head_coord = (opp_head["x"], opp_head["y"]) if is_1v1 else None
+    food_coords_list = [(f["x"], f["y"]) for f in game_state.get("board", {}).get("food", [])]
+    opp_is_naive = update_opponent_tracker(game_state, opp_head_coord, food_coords_list) if is_1v1 else False
+    if is_1v1 and opp_is_naive:
+        print(f"MOVE {game_state['turn']}: OPPONENT MODELING -> Naive food-seeker detected! Aggressive pressure active.", flush=True)
 
     my_body_tuples = [(segment["x"], segment["y"]) for segment in my_body]
     opp_body_tuples = [(segment["x"], segment["y"]) for segment in opp_snake["body"]] if is_1v1 else []
@@ -936,7 +1028,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if is_1v1 and my_health > 35 and candidate_moves:
             best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
                 candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
-                board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink
+                board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink,
+                opp_is_naive=opp_is_naive
             )
             print(f"MOVE {game_state['turn']} (1v1 NEAR STORM ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
             return {"move": best_move}
@@ -972,7 +1065,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
         if immediate_safe_food and my_length <= opp_length:
             best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
                 immediate_safe_food, my_body_tuples, opp_body_tuples, all_food_coords,
-                board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink
+                board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink,
+                opp_is_naive=opp_is_naive
             )
             print(f"MOVE {game_state['turn']} (1v1 GROWTH ITERATIVE MINIMAX): Eating food with {best_move} (Score: {score:.1f}, Depth: {reached_depth}, Time: {duration_ms:.1f}ms)", flush=True)
             return {"move": best_move}
@@ -980,7 +1074,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
         # 3. Tactical Domination: Iterative Deepening Minimax with move ordering
         best_move, score, reached_depth, duration_ms, all_scores = select_best_minimax_move(
             candidate_moves, my_body_tuples, opp_body_tuples, all_food_coords,
-            board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink
+            board_width, board_height, time_limit=0.140, turns_until_shrink=turns_until_shrink,
+            opp_is_naive=opp_is_naive
         )
         print(f"MOVE {game_state['turn']} (1v1 ITERATIVE MINIMAX): Selected {best_move} (Score: {score:.1f}, Reached Depth: {reached_depth}, Time: {duration_ms:.1f}ms, Choices: {all_scores})", flush=True)
         return {"move": best_move}
