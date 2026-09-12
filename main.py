@@ -204,6 +204,117 @@ def update_opponent_tracker(
 
 
 # ---------------------------------------------------------
+# SURVIVAL MODE HELPERS (Disadvantaged / Shortest Snake State)
+# ---------------------------------------------------------
+def check_survival_mode(my_length: int, alive_opponents: typing.List[typing.Dict]) -> bool:
+    """
+    Checks whether the snake should enter Survival Mode this turn:
+    1. My snake is the shortest (or tied shortest) among all alive opponents, OR
+    2. My snake is more than a small margin (> 1.0) shorter than the average opponent length.
+    Returns False if no opponents are alive or upon any error.
+    """
+    try:
+        if not alive_opponents:
+            return False
+        opp_lengths = [len(s.get("body", [])) for s in alive_opponents if s.get("body")]
+        if not opp_lengths:
+            return False
+
+        min_opp_len = min(opp_lengths)
+        if my_length <= min_opp_len:
+            return True
+
+        avg_opp_len = sum(opp_lengths) / float(len(opp_lengths))
+        if my_length < (avg_opp_len - 1.0):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
+def select_survival_mode_move(
+    candidate_moves: typing.List[str],
+    future_head_positions: typing.Dict[str, typing.Dict[str, int]],
+    space_by_move: typing.Dict[str, int],
+    alive_opponents: typing.List[typing.Dict],
+    target_foods: typing.Set[typing.Tuple[int, int]],
+    hazard_coords: typing.Set[typing.Tuple[int, int]],
+    board_width: int,
+    board_height: int,
+    turns_until_shrink: int,
+    find_food_distance_bfs_fn: typing.Callable,
+) -> str:
+    """
+    Survival Mode Move Selection:
+    1. Skips dominance-seeking and Minimax lookahead.
+    2. Prioritizes food seeking and health restoration to grow out of disadvantage.
+    3. Adds an extra avoidance buffer: strongly favors moves maximizing distance
+       from ALL opponent heads (actively steering away).
+    4. Ensures open space via flood fill and proactive Royale center bias.
+    """
+    if not candidate_moves:
+        return "up"
+    if len(candidate_moves) == 1:
+        return candidate_moves[0]
+
+    center_coord = {"x": board_width // 2, "y": board_height // 2}
+    opp_heads = [
+        (s["body"][0]["x"], s["body"][0]["y"])
+        for s in alive_opponents if s.get("body")
+    ]
+
+    def survival_score(m: str) -> float:
+        pos = future_head_positions[m]
+        coord = (pos["x"], pos["y"])
+        score = 0.0
+
+        # Safety: Severe penalty for stepping into a hazard
+        if coord in hazard_coords:
+            score -= 500.0
+
+        # 1. Opponent Head Distance Buffer (actively steer away from ANY opponent head)
+        if opp_heads:
+            min_opp_dist = min(abs(pos["x"] - ox) + abs(pos["y"] - oy) for ox, oy in opp_heads)
+            # Heavy penalty if adjacent (strike zone danger)
+            if min_opp_dist <= 1:
+                score -= 150.0
+            elif min_opp_dist == 2:
+                score -= 20.0
+            # Progressive reward for keeping extra distance (up to 6 tiles)
+            score += min(6, min_opp_dist) * 20.0
+
+        # 2. Food-Seeking Priority (growth is the path to safety)
+        if target_foods:
+            max_dim = board_width + board_height
+            if coord in target_foods:
+                score += (max_dim * 10.0) + 150.0  # Immediate food eating is top priority!
+            else:
+                dist = find_food_distance_bfs_fn(pos, target_foods)
+                if dist < float("inf"):
+                    score += (max_dim - min(max_dim, dist)) * 8.0
+                else:
+                    min_manhattan = min(abs(pos["x"] - fx) + abs(pos["y"] - fy) for fx, fy in target_foods)
+                    score += (max_dim - min(max_dim, min_manhattan)) * 4.0
+
+        # 3. Flood-Fill Reachable Space (Trap Avoidance)
+        available_space = space_by_move.get(m, 0)
+        score += min(available_space, board_width * board_height) * 0.5
+
+        # 4. Royale Hazard Countdown Center Bias
+        if turns_until_shrink <= 10:
+            dist_to_center = abs(pos["x"] - center_coord["x"]) + abs(pos["y"] - center_coord["y"])
+            max_c_dist = (board_width // 2) + (board_height // 2)
+            c_closeness = (max_c_dist - dist_to_center) / max_c_dist if max_c_dist > 0 else 1.0
+            urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+            score += c_closeness * 15.0 * urgency
+
+        return score
+
+    return max(candidate_moves, key=survival_score)
+
+
+# ---------------------------------------------------------
 # PART 1: AREA-CONTROL SCORING FUNCTION WITH EDGE/CORNER WEIGHTING & HAZARD-TIMING BIAS
 # ---------------------------------------------------------
 def evaluate_board_state(
@@ -808,6 +919,81 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # (If all moves are threatened, fall back to candidate_moves and hope opponent turns away)
     post_h2h_moves = h2h_safe_moves if h2h_safe_moves else candidate_moves
 
+    hazards = game_state.get("board", {}).get("hazards", [])
+    hazard_coords = {(h["x"], h["y"]) for h in hazards}
+    food_list = game_state.get("board", {}).get("food", [])
+    all_food_coords = {(f["x"], f["y"]) for f in food_list}
+    safe_food_coords = {(f["x"], f["y"]) for f in food_list if (f["x"], f["y"]) not in hazard_coords}
+    shrink_interval = get_shrink_interval(game_state)
+    turns_until_shrink = get_turns_until_shrink(game_state)
+
+    # BFS Walkable Path Distance to Food (navigating around bodies/obstacles, dynamic for any board size)
+    def find_food_distance_bfs(start_coord, target_food_coords):
+        if not target_food_coords:
+            return float("inf")
+        start = (start_coord["x"], start_coord["y"])
+        if start in target_food_coords:
+            return 0
+        visited = {start}
+        queue = deque([(start[0], start[1], 0)])
+        max_search_dist = board_width + board_height
+        while queue:
+            cx, cy, dist = queue.popleft()
+            if dist >= max_search_dist:
+                break
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < board_width and 0 <= ny < board_height:
+                    if (nx, ny) not in all_obstacles and (nx, ny) not in visited:
+                        if (nx, ny) in target_food_coords:
+                            return dist + 1
+                        visited.add((nx, ny))
+                        queue.append((nx, ny, dist + 1))
+        return float("inf")
+
+    alive_opponents = [s for s in opponents if s.get("id") != my_id]
+
+    # ---------------------------------------------------------
+    # SURVIVAL MODE: Shortest or Disadvantaged Snake State
+    # Trigger: Shortest (or tied) among alive snakes, or > 1.0 below average length.
+    # When active: Skips dominance/minimax entirely, adds distance buffer from all opponents,
+    # prioritizes safe food seeking, and ensures flood-fill space.
+    # ---------------------------------------------------------
+    is_survival = check_survival_mode(my_length, alive_opponents)
+    if is_survival and post_h2h_moves:
+        survival_candidates = [
+            m for m in post_h2h_moves
+            if (future_head_positions[m]["x"], future_head_positions[m]["y"]) not in hazard_coords
+        ]
+        if not survival_candidates:
+            survival_candidates = post_h2h_moves
+
+        # Starvation lifeline: if critical health (<= 25) and food on hazard tile
+        my_health = game_state.get("you", {}).get("health", 100)
+        if my_health <= 25:
+            for m in post_h2h_moves:
+                pos = future_head_positions[m]
+                if (pos["x"], pos["y"]) in all_food_coords and m not in survival_candidates:
+                    survival_candidates.append(m)
+
+        survival_foods = safe_food_coords if safe_food_coords else all_food_coords
+        best_survival_move = select_survival_mode_move(
+            candidate_moves=survival_candidates,
+            future_head_positions=future_head_positions,
+            space_by_move=space_by_move,
+            alive_opponents=alive_opponents,
+            target_foods=survival_foods,
+            hazard_coords=hazard_coords,
+            board_width=board_width,
+            board_height=board_height,
+            turns_until_shrink=turns_until_shrink,
+            find_food_distance_bfs_fn=find_food_distance_bfs,
+        )
+        print(f"MOVE {game_state['turn']} (SURVIVAL MODE): Shortest/disadvantaged (Length: {my_length}) -> Selected {best_survival_move} (Distance Buffer Active, Seeking Food)", flush=True)
+        return {"move": best_survival_move}
+
+    # ---------------------------------------------------------
+    # DOMINANCE / MINIMAX PIPELINE (Standard / Equal / Ahead)
     # ---------------------------------------------------------
     # 1v1 VORONOI AREA-CONTROL EVALUATION
     # For duels against a single opponent, evaluate territorial control:
@@ -815,7 +1001,6 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # 2. Shortest distance from opponent head to each empty tile
     # 3. Controlled area = my_tiles - opp_tiles (relative advantage)
     # ---------------------------------------------------------
-    alive_opponents = [s for s in opponents if s.get("id") != my_id]
     is_1v1 = (len(alive_opponents) == 1)
     opp_snake = alive_opponents[0] if is_1v1 else None
     opp_head = opp_snake["body"][0] if is_1v1 else None
