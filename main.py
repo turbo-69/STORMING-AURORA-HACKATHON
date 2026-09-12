@@ -90,6 +90,77 @@ def compute_voronoi_control(
     return my_tiles, opp_tiles, my_tiles - opp_tiles
 
 
+# STRATEGY GRADIENT: with 4 snakes alive, pure survival heuristics (above)
+# are what matters -- there's no room for territorial play with that many
+# bodies on the board. Once it's down to a 1v1, full minimax kicks in
+# (see PART 2 below). This function fills the middle tier: exactly one
+# other opponent remains alongside 2+ opponents (i.e. 3 snakes total) --
+# too many for cheap minimax, but few enough that territory control
+# starts to matter. Generalizes compute_voronoi_control to N opponents
+# via a multi-source BFS (every opponent head expands simultaneously;
+# a tile counts as "theirs" if ANY opponent reaches it at least as fast
+# as we do).
+def compute_multi_voronoi_control(
+    cand_head: typing.Dict[str, int],
+    opp_heads: typing.List[typing.Dict[str, int]],
+    board_width: int,
+    board_height: int,
+    all_obstacles: typing.Set[typing.Tuple[int, int]]
+) -> typing.Tuple[int, int, int]:
+    cand_coord = (cand_head["x"], cand_head["y"])
+
+    my_dist = {cand_coord: 0}
+    queue_my = deque([cand_coord])
+    while queue_my:
+        cx, cy = queue_my.popleft()
+        d = my_dist[(cx, cy)]
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < board_width and 0 <= ny < board_height:
+                if (nx, ny) not in all_obstacles and (nx, ny) not in my_dist:
+                    my_dist[(nx, ny)] = d + 1
+                    queue_my.append((nx, ny))
+
+    # Multi-source BFS: all opponent heads expand at once, each tile keeps
+    # the distance from whichever opponent reaches it first.
+    opp_dist = {}
+    queue_opp = deque()
+    for h in opp_heads:
+        coord = (h["x"], h["y"])
+        if coord not in opp_dist:
+            opp_dist[coord] = 0
+            queue_opp.append(coord)
+    while queue_opp:
+        cx, cy = queue_opp.popleft()
+        d = opp_dist[(cx, cy)]
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < board_width and 0 <= ny < board_height:
+                if (nx, ny) not in all_obstacles and (nx, ny) not in opp_dist:
+                    if (nx, ny) != cand_coord:
+                        opp_dist[(nx, ny)] = d + 1
+                        queue_opp.append((nx, ny))
+
+    all_empty_tiles = {
+        (x, y) for x in range(board_width) for y in range(board_height)
+        if (x, y) not in all_obstacles
+    }
+
+    my_tiles = 0
+    opp_tiles = 0
+    for tile in all_empty_tiles:
+        d_m = my_dist.get(tile, float("inf"))
+        d_o = opp_dist.get(tile, float("inf"))
+        if d_m == float("inf") and d_o == float("inf"):
+            continue
+        if d_m <= d_o:
+            my_tiles += 1
+        else:
+            opp_tiles += 1
+
+    return my_tiles, opp_tiles, my_tiles - opp_tiles
+
+
 # ---------------------------------------------------------
 # PART 1: AREA-CONTROL SCORING FUNCTION WITH EDGE/CORNER WEIGHTING
 # ---------------------------------------------------------
@@ -681,10 +752,31 @@ def move(game_state: typing.Dict) -> typing.Dict:
                 "score": score,
             }
 
-    # Helper scoring key: In 1v1, prefer moves maximizing relative controlled area;
-    # in multiplayer, fall back to raw single-snake reachable space.
+    # STRATEGY GRADIENT (middle tier): exactly 3 snakes alive total (us +
+    # 2 opponents). Too many for cheap minimax, but few enough that territory
+    # control is worth factoring in rather than pure single-snake space.
+    # Uses the same Voronoi-style scoring as 1v1, generalized via multi-source
+    # BFS across both opponents. 4-snake play (below this) is untouched --
+    # pure survival heuristics, no territorial reasoning.
+    is_three_snake = (len(alive_opponents) == 2)
+    if is_three_snake:
+        opp_heads = [opp["body"][0] for opp in alive_opponents]
+        for m in safe_moves:
+            cand_head = future_head_positions[m]
+            m_tiles, o_tiles, score = compute_multi_voronoi_control(
+                cand_head, opp_heads, board_width, board_height, all_obstacles
+            )
+            voronoi_stats[m] = {
+                "my_tiles": m_tiles,
+                "opp_tiles": o_tiles,
+                "score": score,
+            }
+
+    # Helper scoring key: in 1v1 or 3-snake play, prefer moves maximizing
+    # relative controlled area; with 4 snakes, fall back to raw single-snake
+    # reachable space (pure survival, no territorial contest).
     def move_preference_key(m):
-        if is_1v1 and m in voronoi_stats:
+        if (is_1v1 or is_three_snake) and m in voronoi_stats:
             return (voronoi_stats[m]["score"], voronoi_stats[m]["my_tiles"])
         return (space_by_move.get(m, 0), 0)
 
@@ -879,8 +971,19 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # storm actually arrives. Applies before the 1v1 minimax branch below
     # since positioning safety takes priority over tactical play; only
     # applies in the royale ruleset, standard mode is unaffected.
+    #
+    # REGRESSION FOUND AND FIXED: originally gated only on ruleset, this
+    # engaged from turn 0 even with zero hazards anywhere on the board --
+    # every snake (all comfortably healthy and far from center at spawn)
+    # beelined straight for the exact center simultaneously and collided in
+    # an entirely unforced pile-up (confirmed via a real match: 4 snakes,
+    # 0 hazards the whole game, all walked in a straight line to center,
+    # died in a mutual collision on turn 8). Now also requires the storm to
+    # have actually started (hazard_coords non-empty) before drifting --
+    # still proactive relative to OUR position, just not before there's any
+    # storm on the board at all.
     is_royale_ruleset = game_state.get("game", {}).get("ruleset", {}).get("name") == "royale"
-    if is_royale_ruleset:
+    if is_royale_ruleset and hazard_coords:
         my_dist_from_center = get_coord_distance(my_head, center_coord)
         DRIFT_HEALTH_THRESHOLD = 80
         DRIFT_DISTANCE_THRESHOLD = max(board_width, board_height) // 4
