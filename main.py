@@ -315,6 +315,171 @@ def select_survival_mode_move(
 
 
 # ---------------------------------------------------------
+# DOMINANCE MODE HELPERS (Meaningful Length Advantage State)
+# ---------------------------------------------------------
+def check_dominance_mode(my_length: int, alive_opponents: typing.List[typing.Dict], margin: float = 2.0) -> bool:
+    """
+    Dominance Mode Trigger Condition:
+    Calculates my snake's length vs. every alive opponent snake's length.
+    Triggers if:
+    1. My snake is the strictly longest (or tied longest) among all alive opponents, AND
+    2. My snake has a meaningful length margin (>= margin, default 2.0) over the average opponent.
+    Returns False if no opponents are alive or upon any error.
+    """
+    try:
+        if not alive_opponents:
+            return False
+        opp_lengths = [len(s.get("body", [])) for s in alive_opponents if s.get("body")]
+        if not opp_lengths:
+            return False
+
+        max_opp_len = max(opp_lengths)
+        if my_length < max_opp_len:
+            return False
+
+        avg_opp_len = sum(opp_lengths) / float(len(opp_lengths))
+        if (my_length - avg_opp_len) < margin:
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def determine_behavior_mode(my_length: int, alive_opponents: typing.List[typing.Dict]) -> str:
+    """
+    Determines the active high-level behavior mode:
+    Returns 'SURVIVAL', 'DOMINANCE', or 'DEFAULT' (neutral).
+    Guarantees mutual exclusivity.
+    """
+    if check_survival_mode(my_length, alive_opponents):
+        return "SURVIVAL"
+    if check_dominance_mode(my_length, alive_opponents):
+        return "DOMINANCE"
+    return "DEFAULT"
+
+
+def select_dominance_mode_move(
+    candidate_moves: typing.List[str],
+    future_head_positions: typing.Dict[str, typing.Dict[str, int]],
+    space_by_move: typing.Dict[str, int],
+    alive_opponents: typing.List[typing.Dict],
+    all_obstacles: typing.Set[typing.Tuple[int, int]],
+    board_width: int,
+    board_height: int,
+    my_health: int,
+    target_foods: typing.Set[typing.Tuple[int, int]],
+    hazard_coords: typing.Set[typing.Tuple[int, int]],
+    turns_until_shrink: int,
+    my_body_tuples: typing.List[typing.Tuple[int, int]],
+    time_limit: float = 0.140,
+) -> str:
+    """
+    Dominance Mode Move Selection:
+    1. Actively prioritizes area-control and territory-denial over pure food-seeking.
+    2. In 1v1: Uses Voronoi territory constriction (-1.6x on opponent tiles) and proximity squeeze.
+    3. In Multiplayer (2+ opponents): Pinches shared corridors between opponents, constricting
+       their space and forcing them into collisions.
+    4. Food-seeking is suppressed unless starving (health <= 30).
+    """
+    if not candidate_moves:
+        return "up"
+    if len(candidate_moves) == 1:
+        return candidate_moves[0]
+
+    center_coord = {"x": board_width // 2, "y": board_height // 2}
+    is_1v1 = (len(alive_opponents) == 1)
+
+    # Emergency starvation check: If health is critically low (<= 30), allow food seeking
+    if my_health <= 30 and target_foods:
+        immediate_food = [m for m in candidate_moves if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in target_foods]
+        if immediate_food:
+            return immediate_food[0]
+
+    if is_1v1:
+        opp_snake = alive_opponents[0]
+        opp_body = [(s["x"], s["y"]) for s in opp_snake.get("body", [])]
+        opp_head = opp_snake.get("body", [{}])[0]
+
+        def dominance_1v1_score(m: str) -> float:
+            cand = future_head_positions[m]
+            coord = (cand["x"], cand["y"])
+            if coord in hazard_coords:
+                return -9999.0
+
+            my_tiles, opp_tiles, rel_score = compute_voronoi_control(
+                cand, opp_head, board_width, board_height, all_obstacles
+            )
+            # Territory Denial Metric: Heavily penalize opponent tiles (-1.6x)
+            denial_score = (my_tiles * 1.0) - (opp_tiles * 1.6)
+
+            # Proximity squeeze: get closer to the opponent head to compress their maneuverability
+            dist_to_opp = abs(cand["x"] - opp_head["x"]) + abs(cand["y"] - opp_head["y"])
+            max_d = board_width + board_height
+            if max_d > 0:
+                denial_score += ((max_d - dist_to_opp) / max_d) * 8.0
+
+            # Edge / Corner perimeter weighting
+            if cand["x"] in (0, board_width - 1) or cand["y"] in (0, board_height - 1):
+                denial_score += 1.5
+
+            # Royale center bias
+            if turns_until_shrink <= 10:
+                dist_c = abs(cand["x"] - center_coord["x"]) + abs(cand["y"] - center_coord["y"])
+                max_c = (board_width // 2) + (board_height // 2)
+                closeness = (max_c - dist_c) / max_c if max_c > 0 else 1.0
+                urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+                denial_score += closeness * 8.0 * urgency
+
+            return denial_score
+
+        try:
+            best_move, score, depth, dur, choices = select_best_minimax_move(
+                candidate_moves, my_body_tuples, opp_body, set(),
+                board_width, board_height, time_limit=time_limit,
+                turns_until_shrink=turns_until_shrink, opp_is_naive=True
+            )
+            return max(candidate_moves, key=lambda m: dominance_1v1_score(m) + (choices.get(m, 0) * 0.5))
+        except Exception:
+            return max(candidate_moves, key=dominance_1v1_score)
+
+    else:
+        # MULTIPLAYER DOMINANCE (2+ opponents alive):
+        # Constrict shared open space between multiple opponents.
+        opp_heads = [(s["body"][0]["x"], s["body"][0]["y"]) for s in alive_opponents if s.get("body")]
+
+        def dominance_multi_score(m: str) -> float:
+            cand = future_head_positions[m]
+            coord = (cand["x"], cand["y"])
+            if coord in hazard_coords:
+                return -9999.0
+
+            score = float(space_by_move.get(m, 0))
+
+            if len(opp_heads) >= 2:
+                # Calculate distance to all opponent heads
+                dists = [abs(cand["x"] - ox) + abs(cand["y"] - oy) for ox, oy in opp_heads]
+                dists_sorted = sorted(dists)
+                d_first, d_second = dists_sorted[0], dists_sorted[1]
+                # Pinch bonus: close to both opponents to block their mutual open space
+                shared_proximity = (d_first + d_second)
+                max_d = (board_width + board_height) * 2
+                score += ((max_d - shared_proximity) / max_d) * 25.0
+
+            # Royale center bias
+            if turns_until_shrink <= 10:
+                dist_c = abs(cand["x"] - center_coord["x"]) + abs(cand["y"] - center_coord["y"])
+                max_c = (board_width // 2) + (board_height // 2)
+                closeness = (max_c - dist_c) / max_c if max_c > 0 else 1.0
+                urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+                score += closeness * 10.0 * urgency
+
+            return score
+
+        return max(candidate_moves, key=dominance_multi_score)
+
+
+# ---------------------------------------------------------
 # PART 1: AREA-CONTROL SCORING FUNCTION WITH EDGE/CORNER WEIGHTING & HAZARD-TIMING BIAS
 # ---------------------------------------------------------
 def evaluate_board_state(
@@ -954,13 +1119,15 @@ def move(game_state: typing.Dict) -> typing.Dict:
     alive_opponents = [s for s in opponents if s.get("id") != my_id]
 
     # ---------------------------------------------------------
-    # SURVIVAL MODE: Shortest or Disadvantaged Snake State
-    # Trigger: Shortest (or tied) among alive snakes, or > 1.0 below average length.
-    # When active: Skips dominance/minimax entirely, adds distance buffer from all opponents,
-    # prioritizes safe food seeking, and ensures flood-fill space.
+    # BEHAVIOR MODE DISPATCH: SURVIVAL vs DOMINANCE vs DEFAULT
+    # Checked once per turn, clean separate mutually-exclusive branches.
     # ---------------------------------------------------------
-    is_survival = check_survival_mode(my_length, alive_opponents)
-    if is_survival and post_h2h_moves:
+    mode = determine_behavior_mode(my_length, alive_opponents)
+
+    # ---------------------------------------------------------
+    # BRANCH 1: SURVIVAL MODE (Shortest or Disadvantaged Snake)
+    # ---------------------------------------------------------
+    if mode == "SURVIVAL" and post_h2h_moves:
         survival_candidates = [
             m for m in post_h2h_moves
             if (future_head_positions[m]["x"], future_head_positions[m]["y"]) not in hazard_coords
@@ -993,7 +1160,38 @@ def move(game_state: typing.Dict) -> typing.Dict:
         return {"move": best_survival_move}
 
     # ---------------------------------------------------------
-    # DOMINANCE / MINIMAX PIPELINE (Standard / Equal / Ahead)
+    # BRANCH 2: DOMINANCE MODE (Longest with Meaningful Margin)
+    # ---------------------------------------------------------
+    elif mode == "DOMINANCE" and post_h2h_moves:
+        dominance_candidates = [
+            m for m in post_h2h_moves
+            if (future_head_positions[m]["x"], future_head_positions[m]["y"]) not in hazard_coords
+        ]
+        if not dominance_candidates:
+            dominance_candidates = post_h2h_moves
+
+        my_health = game_state.get("you", {}).get("health", 100)
+        my_body_tuples = [(segment["x"], segment["y"]) for segment in my_body]
+        best_dominance_move = select_dominance_mode_move(
+            candidate_moves=dominance_candidates,
+            future_head_positions=future_head_positions,
+            space_by_move=space_by_move,
+            alive_opponents=alive_opponents,
+            all_obstacles=all_obstacles,
+            board_width=board_width,
+            board_height=board_height,
+            my_health=my_health,
+            target_foods=safe_food_coords if safe_food_coords else all_food_coords,
+            hazard_coords=hazard_coords,
+            turns_until_shrink=turns_until_shrink,
+            my_body_tuples=my_body_tuples,
+            time_limit=0.140,
+        )
+        print(f"MOVE {game_state['turn']} (DOMINANCE MODE): Longest with margin (Length: {my_length}) -> Selected {best_dominance_move} (Area-Control/Territory-Denial Active)", flush=True)
+        return {"move": best_dominance_move}
+
+    # ---------------------------------------------------------
+    # BRANCH 3: DEFAULT / NEUTRAL MODE (Minimax + Opponent Modeling)
     # ---------------------------------------------------------
     # 1v1 VORONOI AREA-CONTROL EVALUATION
     # For duels against a single opponent, evaluate territorial control:
