@@ -19,15 +19,19 @@ class TestDominanceModeTriggers(unittest.TestCase):
         self.assertEqual(determine_behavior_mode(8, alive_opponents), "DOMINANCE")
 
     def test_dominance_does_not_trigger_when_barely_longer(self):
-        # We have length 6. Opponents have lengths 5, 5, 5 (max=5, avg=5.0, diff=1.0 < 2.0)
+        # 1v1: We have length 6, opponent length 5 (diff=1.0 < 2.0) -> DEFAULT
+        opp_1v1 = [{"id": "opp1", "body": [{"x": 1, "y": 1}] * 5}]
+        self.assertFalse(check_dominance_mode(6, opp_1v1))
+        self.assertEqual(determine_behavior_mode(6, opp_1v1), "DEFAULT")
+
+        # Multi-snake: We have length 6. Opponents have lengths 5, 5, 5 (diff=1.0 < 2.0) -> OPPORTUNIST
         alive_opponents = [
             {"id": "opp1", "body": [{"x": 1, "y": 1}] * 5},
             {"id": "opp2", "body": [{"x": 2, "y": 2}] * 5},
             {"id": "opp3", "body": [{"x": 3, "y": 3}] * 5},
         ]
         self.assertFalse(check_dominance_mode(6, alive_opponents))
-        # Should be DEFAULT (neutral) mode
-        self.assertEqual(determine_behavior_mode(6, alive_opponents), "DEFAULT")
+        self.assertEqual(determine_behavior_mode(6, alive_opponents), "OPPORTUNIST")
 
     def test_dominance_does_not_trigger_when_tied_or_shorter(self):
         # Tied with leader: length 7 vs 7, 5, 4 (diff=7 - 5.33 = 1.67 < 2.0)
@@ -79,7 +83,8 @@ class TestDominanceModeTriggers(unittest.TestCase):
             elif is_dom:
                 self.assertEqual(mode, "DOMINANCE")
             else:
-                self.assertEqual(mode, "DEFAULT")
+                expected_fallback = "OPPORTUNIST" if len(alive) >= 2 else "DEFAULT"
+                self.assertEqual(mode, expected_fallback)
 
 
 class TestDominanceModeBehavior(unittest.TestCase):

@@ -53,6 +53,8 @@ def on_end():
     return "ok"
 
 if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", "8001"))
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
-    print("Dummy Opponent Snake running on http://localhost:8001")
-    app.run(host="0.0.0.0", port=8001)
+    print(f"Dummy Opponent Snake running on http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port)

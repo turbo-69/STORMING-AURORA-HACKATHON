@@ -347,16 +347,42 @@ def check_dominance_mode(my_length: int, alive_opponents: typing.List[typing.Dic
         return False
 
 
+def check_opportunist_mode(my_length: int, alive_opponents: typing.List[typing.Dict]) -> bool:
+    """
+    Opportunist Mode Trigger Condition:
+    1. At least 3 snakes are still alive total (meaning len(alive_opponents) >= 2).
+    2. Neither Survival Mode (shortest or disadvantaged) nor Dominance Mode (longest with margin >= 2.0)
+       is currently active.
+    i.e. My snake is roughly mid-pack with no clear advantage yet.
+    Returns False if fewer than 2 opponents are alive (drops to 1v1).
+    """
+    try:
+        if not alive_opponents or len(alive_opponents) < 2:
+            return False
+        if check_survival_mode(my_length, alive_opponents):
+            return False
+        if check_dominance_mode(my_length, alive_opponents):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def determine_behavior_mode(my_length: int, alive_opponents: typing.List[typing.Dict]) -> str:
     """
-    Determines the active high-level behavior mode:
-    Returns 'SURVIVAL', 'DOMINANCE', or 'DEFAULT' (neutral).
-    Guarantees mutual exclusivity.
+    Determines the active high-level behavior mode across all 4 states in priority order:
+    1. SURVIVAL: Safety-critical (shortest or below average length by margin)
+    2. DOMINANCE: Meaningful length advantage (longest with >= 2.0 margin)
+    3. OPPORTUNIST: 3+ snakes alive, mid-pack, third-party avoidance
+    4. DEFAULT: 1v1 neutral duel or standard minimax
+    Guarantees strict 4-way mutual exclusivity.
     """
     if check_survival_mode(my_length, alive_opponents):
         return "SURVIVAL"
     if check_dominance_mode(my_length, alive_opponents):
         return "DOMINANCE"
+    if check_opportunist_mode(my_length, alive_opponents):
+        return "OPPORTUNIST"
     return "DEFAULT"
 
 
@@ -478,6 +504,106 @@ def select_dominance_mode_move(
             return score
 
         return max(candidate_moves, key=dominance_multi_score)
+
+
+# ---------------------------------------------------------
+# OPPORTUNIST MODE MOVE SELECTION (Peripheral / Mid-Pack Strategy)
+# ---------------------------------------------------------
+def select_opportunist_mode_move(
+    candidate_moves: typing.List[str],
+    future_head_positions: typing.Dict[str, typing.Dict[str, int]],
+    space_by_move: typing.Dict[str, int],
+    alive_opponents: typing.List[typing.Dict],
+    all_obstacles: typing.Set[typing.Tuple[int, int]],
+    board_width: int,
+    board_height: int,
+    my_health: int,
+    target_foods: typing.Set[typing.Tuple[int, int]],
+    hazard_coords: typing.Set[typing.Tuple[int, int]],
+    turns_until_shrink: int,
+    find_food_distance_bfs_fn: typing.Callable,
+) -> str:
+    """
+    Opportunist Mode Behavior:
+    1. Third-Party / Cluster Avoidance: Stay peripheral and away from where other snakes are
+       densely clustered or actively fighting each other.
+    2. Head-to-Head Avoidance: Avoid initiating ANY head-to-head collision zones (even against
+       shorter snakes), letting opponents fight each other instead.
+    3. Normal Food & Health Management: Pursue food at moderate distance to steadily grow without
+       over-committing to contested tiles.
+    4. Trap Avoidance: Always maintain high flood-fill reachable space.
+    5. Royale Storm Timing: Center-bias when shrink countdown <= 10.
+    """
+    if not candidate_moves:
+        return "up"
+    if len(candidate_moves) == 1:
+        return candidate_moves[0]
+
+    center_coord = {"x": board_width // 2, "y": board_height // 2}
+    opp_heads = [
+        (s["body"][0]["x"], s["body"][0]["y"])
+        for s in alive_opponents
+        if s.get("body") and len(s["body"]) > 0
+    ]
+
+    # Calculate centroid of all opponent heads (epicenter of opponent activity)
+    if opp_heads:
+        centroid_x = sum(h[0] for h in opp_heads) / float(len(opp_heads))
+        centroid_y = sum(h[1] for h in opp_heads) / float(len(opp_heads))
+    else:
+        centroid_x, centroid_y = center_coord["x"], center_coord["y"]
+
+    # All opponent strike zones (tiles adjacent to ANY opponent head)
+    all_opp_strike_zones = set()
+    for ox, oy in opp_heads:
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            all_opp_strike_zones.add((ox + dx, oy + dy))
+
+    max_dist = board_width + board_height
+
+    def opportunist_score(m: str) -> float:
+        cand = future_head_positions[m]
+        cand_coord = (cand["x"], cand["y"])
+
+        if cand_coord in hazard_coords:
+            return -9999.0
+
+        score = 0.0
+
+        # 1. Voluntary Conflict Avoidance:
+        # Do not step into adjacent tiles of ANY opponent head unless forced!
+        if cand_coord in all_opp_strike_zones:
+            score -= 60.0
+
+        # 2. Cluster / Centroid Avoidance:
+        # Reward distance away from opponent centroid (staying peripheral)
+        dist_to_centroid = abs(cand["x"] - centroid_x) + abs(cand["y"] - centroid_y)
+        score += (dist_to_centroid / max_dist) * 20.0
+
+        # 3. Normal Food Seeking & Health Management
+        # Prioritize food when health is moderate/low, or when safe food is nearby
+        food_dist = find_food_distance_bfs_fn(cand, target_foods)
+        if food_dist != float("inf"):
+            urgency_mult = 35.0 if my_health <= 40 else 15.0
+            score += max(0.0, (max_dist - food_dist) / max_dist) * urgency_mult
+            if cand_coord in target_foods:
+                score += 25.0
+
+        # 4. Open Space / Trap Avoidance
+        available_space = space_by_move.get(m, 0)
+        score += min(available_space, board_width * board_height) * 0.4
+
+        # 5. Royale Hazard Countdown Center Bias
+        if turns_until_shrink <= 10:
+            dist_to_center = abs(cand["x"] - center_coord["x"]) + abs(cand["y"] - center_coord["y"])
+            max_c_dist = (board_width // 2) + (board_height // 2)
+            c_closeness = (max_c_dist - dist_to_center) / max_c_dist if max_c_dist > 0 else 1.0
+            urgency = (10 - max(1, turns_until_shrink) + 1) / 10.0
+            score += c_closeness * 15.0 * urgency
+
+        return score
+
+    return max(candidate_moves, key=opportunist_score)
 
 
 # ---------------------------------------------------------
@@ -981,6 +1107,9 @@ def move(game_state: typing.Dict) -> typing.Dict:
                 tail = opp["body"][-1]
                 opp["body"] = list(opp["body"]) + [tail] * handicap
                 opp["length"] = len(opp["body"])
+                # In multiplayer matches, handicap only one opponent so mid-pack distribution is created
+                if len(opponents) > 2:
+                    break
     for opponent in opponents:
         for direction, future_coord in future_head_positions.items():
             if future_coord in opponent["body"]:
@@ -1145,6 +1274,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
         print(f"Turn {turn_num}: SURVIVAL MODE ACTIVE (My Length: {my_length}, Opp Max: {max_opp_l}, Opp Avg: {avg_opp_l:.1f})", flush=True)
     elif mode == "DOMINANCE":
         print(f"Turn {turn_num}: DOMINANCE MODE ACTIVE (My Length: {my_length}, Opp Max: {max_opp_l}, Opp Avg: {avg_opp_l:.1f})", flush=True)
+    elif mode == "OPPORTUNIST":
+        print(f"Turn {turn_num}: OPPORTUNIST MODE ACTIVE (My Length: {my_length}, Opp Max: {max_opp_l}, Alive Opps: {len(alive_opponents)})", flush=True)
     else:
         print(f"Turn {turn_num}: default behavior (My Length: {my_length}, Opp Max: {max_opp_l}, Opp Avg: {avg_opp_l:.1f})", flush=True)
 
@@ -1215,7 +1346,36 @@ def move(game_state: typing.Dict) -> typing.Dict:
         return {"move": best_dominance_move}
 
     # ---------------------------------------------------------
-    # BRANCH 3: DEFAULT / NEUTRAL MODE (Minimax + Opponent Modeling)
+    # BRANCH 3: OPPORTUNIST MODE (3+ Snakes Alive, Mid-Pack State)
+    # ---------------------------------------------------------
+    elif mode == "OPPORTUNIST" and post_h2h_moves:
+        opportunist_candidates = [
+            m for m in post_h2h_moves
+            if (future_head_positions[m]["x"], future_head_positions[m]["y"]) not in hazard_coords
+        ]
+        if not opportunist_candidates:
+            opportunist_candidates = post_h2h_moves
+
+        my_health = game_state.get("you", {}).get("health", 100)
+        best_opportunist_move = select_opportunist_mode_move(
+            candidate_moves=opportunist_candidates,
+            future_head_positions=future_head_positions,
+            space_by_move=space_by_move,
+            alive_opponents=alive_opponents,
+            all_obstacles=all_obstacles,
+            board_width=board_width,
+            board_height=board_height,
+            my_health=my_health,
+            target_foods=safe_food_coords if safe_food_coords else all_food_coords,
+            hazard_coords=hazard_coords,
+            turns_until_shrink=turns_until_shrink,
+            find_food_distance_bfs_fn=find_food_distance_bfs,
+        )
+        print(f"MOVE {game_state['turn']} (OPPORTUNIST MODE): Mid-pack (Length: {my_length}, {len(alive_opponents)} opps) -> Selected {best_opportunist_move} (Avoiding Clusters & Third-Party Contests)", flush=True)
+        return {"move": best_opportunist_move}
+
+    # ---------------------------------------------------------
+    # BRANCH 4: DEFAULT / NEUTRAL MODE (Minimax + Opponent Modeling)
     # ---------------------------------------------------------
     # 1v1 VORONOI AREA-CONTROL EVALUATION
     # For duels against a single opponent, evaluate territorial control:
