@@ -26,9 +26,9 @@
 
 ### 🧠 Person 1 (Bhuvan) — Logic Prompter
 - **Active Branch:** `Dev/Person1/Bhuvan`
-- **Status:** In progress (Opponent avoidance and multi-tier food seeking implemented)
+- **Status:** In progress (Opponent avoidance, food-seeking, and full-board flood-fill trap avoidance implemented)
 - **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic
-- **Latest:** Added opponent body collision prevention and smart food-seeking (health-tiered: critical <25, moderate <=50, relaxed >50). Next: Avoid head-to-head collisions with larger snakes.
+- **Latest:** Added full-board flood-fill to prevent entering pockets smaller than snake length, intelligent emergency escape, and strict safety priority over food. Next: Head-to-head collision safety against larger snakes.
 
 ### 🚀 Person 2 — Deploy & Infra Owner
 - **Status:** In progress — connecting team repo to PythonAnywhere
