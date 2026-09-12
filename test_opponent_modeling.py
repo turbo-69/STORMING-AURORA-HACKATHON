@@ -89,16 +89,17 @@ class TestOpponentModelingEvaluation(unittest.TestCase):
         self.assertGreater(score_aggressive, score_standard)
 
     def test_no_inflation_when_behind_or_tied(self):
-        # Symmetrical board where base score is 0 or negative
+        # Board where we are trapped/behind: opponent controls majority of space
         my_head = (0, 0)
-        my_body = [(0, 0)]
-        opp_head = (4, 4)
-        opp_body = [(4, 4)]
+        my_body = [(0, 0), (0, 1), (1, 0)]
+        opp_head = (2, 2)
+        opp_body = [(2, 2), (2, 3), (3, 2)]
 
         score_standard = evaluate_board_state(my_head, my_body, opp_head, opp_body, 5, 5, opp_is_naive=False)
         score_naive = evaluate_board_state(my_head, my_body, opp_head, opp_body, 5, 5, opp_is_naive=True)
 
-        # Should remain identical if not ahead
+        # When score is negative (behind), aggression multiplier must NOT inflate
+        self.assertLess(score_standard, 0.0)
         self.assertAlmostEqual(score_standard, score_naive)
 
 
