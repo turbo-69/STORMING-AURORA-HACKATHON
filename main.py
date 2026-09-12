@@ -113,7 +113,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
     my_health = game_state["you"]["health"]
     food_list = game_state["board"]["food"]
 
-    # If food exists on the board, calculate distances to the nearest piece of food
+    # If food exists on the board, prioritize the safe move that brings us closest to food
     if food_list:
         # Helper: Calculate distance between two coordinates
         def get_distance(a, b):
@@ -122,43 +122,25 @@ def move(game_state: typing.Dict) -> typing.Dict:
         # Find the single closest food item to our current head
         nearest_food = min(food_list, key=lambda f: get_distance(my_head, f))
 
-        # Sort the safe moves by which ones get us closest to that food
-        safe_moves_by_food_distance = sorted(
-            safe_moves,
-            key=lambda m: get_distance(future_head_positions[m], nearest_food)
+        # Calculate the distance to nearest_food for each safe move
+        min_distance = min(
+            get_distance(future_head_positions[m], nearest_food) for m in safe_moves
         )
 
-        # Condition A: CRITICAL HUNGER (health < 25)
-        # Prioritize food above all else (always pick the move that minimizes distance to food)
-        if my_health < 25:
-            next_move = safe_moves_by_food_distance[0]
-            print(f"MOVE {game_state['turn']}: CRITICAL HEALTH ({my_health})! Chasing food with {next_move}")
-            return {"move": next_move}
+        # Collect all safe moves that achieve this best (smallest) distance to food
+        best_food_moves = [
+            m for m in safe_moves
+            if get_distance(future_head_positions[m], nearest_food) == min_distance
+        ]
 
-        # Condition B: MODERATE HUNGER (25 <= health <= 50)
-        # Prefer moving toward food to stay healthy
-        elif my_health <= 50:
-            next_move = safe_moves_by_food_distance[0]
-            print(f"MOVE {game_state['turn']}: Seeking food at health ({my_health}) with {next_move}")
-            return {"move": next_move}
-
-        # Condition C: WELL-FED (health > 50)
-        # If a safe move directly steps on food or brings us closer, we can take it, or wander safely
-        else:
-            best_move = safe_moves_by_food_distance[0]
-            dist_with_best_move = get_distance(future_head_positions[best_move], nearest_food)
-            # If food is immediately adjacent (1 step away), grab it to grow
-            if dist_with_best_move == 0:
-                print(f"MOVE {game_state['turn']}: Well-fed ({my_health}) but grabbed adjacent food with {best_move}")
-                return {"move": best_move}
-            # Otherwise, pick randomly among safe moves to avoid being predictable
-            next_move = random.choice(safe_moves)
-            print(f"MOVE {game_state['turn']}: Well-fed ({my_health}), relaxed safe move {next_move}")
-            return {"move": next_move}
+        # Pick among the best food moves (if tied, e.g. both 'up' and 'right' get closer)
+        next_move = random.choice(best_food_moves)
+        print(f"MOVE {game_state['turn']}: Targeting nearest food at ({nearest_food['x']}, {nearest_food['y']}) with {next_move} (Health: {my_health})")
+        return {"move": next_move}
 
     # If there is no food on the board, pick randomly among safe moves
     next_move = random.choice(safe_moves)
-    print(f"MOVE {game_state['turn']}: {next_move}")
+    print(f"MOVE {game_state['turn']}: No food on board. Wandering safely with {next_move}")
     return {"move": next_move}
 
 
