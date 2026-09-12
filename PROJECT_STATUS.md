@@ -26,9 +26,9 @@
 
 ### 🧠 Person 1 (Bhuvan) — Logic Prompter
 - **Active Branch:** `Dev/Person1/Bhuvan`
-- **Status:** In progress (Opponent avoidance, food-seeking, and full-board flood-fill trap avoidance implemented)
+- **Status:** In progress (Full Standard-mode suite complete: Wall, Body, Flood-Fill, Head-to-Head, and Food-Seeking)
 - **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic
-- **Latest:** Added full-board flood-fill to prevent entering pockets smaller than snake length, intelligent emergency escape, and strict safety priority over food. Next: Head-to-head collision safety against larger snakes.
+- **Latest:** Added head-to-head collision avoidance against equal/larger snakes while contesting smaller snakes. Standard-mode Qualifying logic is now complete! Next: Royale storm/hazard awareness for bracket stage.
 
 ### 🚀 Person 2 — Deploy & Infra Owner
 - **Status:** In progress — connecting team repo to PythonAnywhere

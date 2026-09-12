@@ -181,7 +181,38 @@ def move(game_state: typing.Dict) -> typing.Dict:
     candidate_moves = spacious_safe_moves if spacious_safe_moves else [max(safe_moves, key=lambda m: space_by_move[m])]
 
     # ---------------------------------------------------------
-    # PHASE 3: FOOD SEEKING (Only among verified safe, non-trap moves)
+    # PHASE 3: HEAD-TO-HEAD COLLISION AVOIDANCE
+    # If an opponent is equal or longer than us, avoid tiles they can move into!
+    # If an opponent is strictly shorter than us, it's safe/good to contest that tile.
+    # ---------------------------------------------------------
+    dangerous_head_zones = set()
+    my_id = game_state["you"].get("id")
+
+    for opponent in opponents:
+        if opponent.get("id") == my_id:
+            continue
+
+        opp_body = opponent["body"]
+        opp_length = len(opp_body)
+        opp_head = opp_body[0]
+
+        # If opponent is equal or longer than us, a head-on collision kills or ties us
+        if opp_length >= my_length:
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                dangerous_head_zones.add((opp_head["x"] + dx, opp_head["y"] + dy))
+
+    # Filter out moves that step into a larger/equal snake's strike zone
+    h2h_safe_moves = [
+        m for m in candidate_moves
+        if (future_head_positions[m]["x"], future_head_positions[m]["y"]) not in dangerous_head_zones
+    ]
+
+    # If we have moves that avoid head-on danger, strictly use those!
+    # (If all moves are threatened, fall back to candidate_moves and hope opponent turns away)
+    final_moves = h2h_safe_moves if h2h_safe_moves else candidate_moves
+
+    # ---------------------------------------------------------
+    # PHASE 4: FOOD SEEKING (Only among verified safe, non-trap, non-H2H moves)
     # ---------------------------------------------------------
     my_health = game_state["you"]["health"]
     food_list = game_state["board"]["food"]
@@ -193,14 +224,14 @@ def move(game_state: typing.Dict) -> typing.Dict:
         # Find the closest food item to our head
         nearest_food = min(food_list, key=lambda f: get_distance(my_head, f))
 
-        # Calculate distance to food for each candidate move
+        # Calculate distance to food for each final safe move
         min_dist_to_food = min(
-            get_distance(future_head_positions[m], nearest_food) for m in candidate_moves
+            get_distance(future_head_positions[m], nearest_food) for m in final_moves
         )
 
-        # Filter candidate moves to only those that minimize distance to nearest food
+        # Filter to only moves that minimize distance to nearest food
         best_food_moves = [
-            m for m in candidate_moves
+            m for m in final_moves
             if get_distance(future_head_positions[m], nearest_food) == min_dist_to_food
         ]
 
@@ -208,8 +239,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
         print(f"MOVE {game_state['turn']}: Safe food path to ({nearest_food['x']}, {nearest_food['y']}) with {next_move} (Health: {my_health}, Room: {space_by_move[next_move]})")
         return {"move": next_move}
 
-    # If no food, pick the candidate move with the most open space
-    next_move = max(candidate_moves, key=lambda m: space_by_move[m])
+    # If no food, pick the move with the most open space
+    next_move = max(final_moves, key=lambda m: space_by_move[m])
     print(f"MOVE {game_state['turn']}: Wandering safely into open space with {next_move}")
     return {"move": next_move}
 
