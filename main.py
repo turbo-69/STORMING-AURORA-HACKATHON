@@ -101,23 +101,6 @@ def move(game_state: typing.Dict) -> typing.Dict:
             if future_coord in opponent["body"]:
                 is_move_safe[direction] = False
 
-    # Collect only the moves that are 100% physically safe this turn
-    safe_moves = [direction for direction, is_safe in is_move_safe.items() if is_safe]
-
-    # EMERGENCY: If completely boxed in, pick any in-bounds direction
-    if len(safe_moves) == 0:
-        in_bounds_moves = []
-        for direction, coord in future_head_positions.items():
-            if 0 <= coord["x"] < board_width and 0 <= coord["y"] < board_height:
-                in_bounds_moves.append(direction)
-        fallback = random.choice(in_bounds_moves) if in_bounds_moves else "down"
-        print(f"MOVE {game_state['turn']}: TRAPPED! No safe moves left. Emergency fallback: {fallback}")
-        return {"move": fallback}
-
-    # ---------------------------------------------------------
-    # PHASE 2: TRAP & DEAD-END AVOIDANCE (Flood Fill)
-    # Don't chase food into a dead-end pocket formed by our own tail!
-    # ---------------------------------------------------------
     # Build a fast lookup set of all obstacle coordinates (our body + opponents)
     all_obstacles = set()
     for segment in my_body:
@@ -141,6 +124,45 @@ def move(game_state: typing.Dict) -> typing.Dict:
                         queue.append((nx, ny))
         return len(visited)
 
+    # Collect only the moves that are 100% physically safe this turn
+    safe_moves = [direction for direction, is_safe in is_move_safe.items() if is_safe]
+
+    # ---------------------------------------------------------
+    # EMERGENCY FALLBACK: If completely boxed in (safe_moves is empty)
+    # Never blindly crash into a wall or neck! Pick whichever direction
+    # has the most open space or chases our vacating tail!
+    # ---------------------------------------------------------
+    if len(safe_moves) == 0:
+        in_bounds_moves = []
+        for direction, coord in future_head_positions.items():
+            if 0 <= coord["x"] < board_width and 0 <= coord["y"] < board_height:
+                if coord != my_neck:
+                    in_bounds_moves.append(direction)
+
+        if not in_bounds_moves:
+            in_bounds_moves = list(future_head_positions.keys())
+
+        my_tail = my_body[-1]
+
+        def calculate_escape_score(direction):
+            coord = future_head_positions[direction]
+            score = 0
+            # If a tile is our tail, it vacates next turn (unless we just ate), so it's the best escape!
+            if coord == my_tail:
+                score += 50
+
+            # Count reachable open tiles from this direction
+            score += count_reachable_space(coord, max_limit=15)
+            return score
+
+        best_escape_move = max(in_bounds_moves, key=calculate_escape_score)
+        print(f"MOVE {game_state['turn']}: TRAPPED! No safe moves. Picked highest open-space escape: {best_escape_move} (Score: {calculate_escape_score(best_escape_move)})")
+        return {"move": best_escape_move}
+
+    # ---------------------------------------------------------
+    # PHASE 2: TRAP & DEAD-END AVOIDANCE (Flood Fill)
+    # Don't chase food into a dead-end pocket formed by our own tail!
+    # ---------------------------------------------------------
     # Score each safe move by how much open room it has
     space_by_move = {m: count_reachable_space(future_head_positions[m]) for m in safe_moves}
 
