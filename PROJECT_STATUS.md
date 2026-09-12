@@ -26,9 +26,9 @@
 
 ### 🧠 Person 1 (Bhuvan) — Logic Prompter
 - **Active Branch:** `Dev/Person1/Bhuvan`
-- **Status:** In progress (Base survival logic active: edge collision + self-body avoidance implemented)
+- **Status:** In progress (Opponent avoidance and multi-tier food seeking implemented)
 - **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic
-- **Latest:** Added board boundary avoidance and self-body collision prevention to `main.py`. Next: Opponent avoidance & food pathing.
+- **Latest:** Added opponent body collision prevention and smart food-seeking (health-tiered: critical <25, moderate <=50, relaxed >50). Next: Avoid head-to-head collisions with larger snakes.
 
 ### 🚀 Person 2 — Deploy & Infra Owner
 - **Status:** In progress — connecting team repo to PythonAnywhere
