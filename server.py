@@ -6,7 +6,7 @@ from flask import Flask
 from flask import request
 
 
-def run_server(handlers: typing.Dict):
+def create_app(handlers: typing.Dict):
     app = Flask("Battlesnake")
 
     @app.get("/")
@@ -37,6 +37,12 @@ def run_server(handlers: typing.Dict):
         )
         return response
 
+    return app
+
+
+def run_server(handlers: typing.Dict):
+    app = create_app(handlers)
+
     host = "0.0.0.0"
     port = int(os.environ.get("PORT", "8000"))
 
@@ -44,3 +50,4 @@ def run_server(handlers: typing.Dict):
 
     print(f"\nRunning Battlesnake at http://{host}:{port}")
     app.run(host=host, port=port)
+
