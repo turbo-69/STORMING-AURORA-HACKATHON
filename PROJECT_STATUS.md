@@ -26,9 +26,9 @@
 
 ### 🧠 Person 1 (Bhuvan) — Logic Prompter
 - **Active Branch:** `Dev/Person1/Bhuvan`
-- **Status:** Complete & Battle-Ready (Standard Qualifying + Proactive Royale Hazard-Timing Awareness + 1v1 Iterative Deepening Minimax with Move Ordering fully implemented)
-- **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic & 1v1 Minimax lookahead
-- **Latest:** Implemented Royale hazard-timing awareness in the evaluation function. The snake tracks the countdown of turns until the next shrink event (`turn % shrink_interval`), smoothly scaling a proactive center bonus as the shrink draws near (within 10 turns). Evaluated with 25 unit tests across `test_hazard_timing.py`, `test_minimax.py`, `test_iterative_minimax.py`, and `test_voronoi.py`, and verified in a live CLI Royale match with `turbo-69` securing the win. Zero timeouts or warnings.
+- **Status:** Complete & Battle-Ready (Standard Qualifying + Royale Hazard-Timing Awareness + 1v1 Iterative Deepening Minimax + Opponent Modeling)
+- **Owns:** `/move` decision logic — Standard-mode survival first, then storm/Royale-aware logic, 1v1 Minimax lookahead, and opponent modeling
+- **Latest:** Merged opponent modeling (`Dev/Person1/opponent-modeling`) into `Dev/Person1/Bhuvan`. Tracks opponent moves across 4-5 turns to detect naive food-seekers and applies an aggression multiplier (+proximity pressure) when ahead while failing safely back to conservative play if ambiguous. Fully verified with 34/34 passing unit tests and live Battlesnake CLI matches. Pushed to GitHub.
 
 ### 🚀 Person 2 — Deploy & Infra Owner
 - **Status:** In progress — connecting team repo to PythonAnywhere
