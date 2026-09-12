@@ -643,8 +643,10 @@ def move(game_state: typing.Dict) -> typing.Dict:
     is_move_safe = {"up": True, "down": True, "left": True, "right": True}
 
     # We've included code to prevent your Battlesnake from moving backwards
-    my_head = game_state["you"]["body"][0]  # Coordinates of your head
-    my_neck = game_state["you"]["body"][1]  # Coordinates of your "neck"
+    you_info = game_state.get("you", {})
+    my_body = you_info.get("body", [{"x": 0, "y": 0}])
+    my_head = my_body[0]
+    my_neck = my_body[1] if len(my_body) > 1 else {"x": my_head["x"], "y": my_head["y"]}
 
     if my_neck["x"] < my_head["x"]:  # Neck is left of head, don't move left
         is_move_safe["left"] = False
@@ -664,7 +666,6 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # ---------------------------------------------------------
     board_width = game_state.get("board", {}).get("width", 11)
     board_height = game_state.get("board", {}).get("height", 11)
-    my_body = game_state["you"]["body"]
     my_length = len(my_body)
 
     # Calculate the future coordinate for all 4 moves
@@ -691,7 +692,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
             is_move_safe[direction] = False
 
     # 3. Prevent colliding with opponent snake bodies
-    opponents = game_state["board"]["snakes"]
+    opponents = game_state.get("board", {}).get("snakes", [])
     for opponent in opponents:
         for direction, future_coord in future_head_positions.items():
             if future_coord in opponent["body"]:
@@ -877,8 +878,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
     def get_coord_distance(a, b):
         return abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
 
-    my_health = game_state["you"]["health"]
-    food_list = game_state["board"]["food"]
+    my_health = game_state.get("you", {}).get("health", 100)
+    food_list = game_state.get("board", {}).get("food", [])
     all_food_coords = {(f["x"], f["y"]) for f in food_list}
     safe_food_coords = {(f["x"], f["y"]) for f in food_list if (f["x"], f["y"]) not in hazard_coords}
 
