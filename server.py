@@ -49,5 +49,9 @@ def run_server(handlers: typing.Dict):
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
     print(f"\nRunning Battlesnake at http://{host}:{port}")
-    app.run(host=host, port=port)
+    # threaded=True: the bot may be playing more than one game at a time
+    # during heats (the event handbook explicitly warns about this). Flask's
+    # dev server defaults to handling one request at a time, which can queue
+    # /move requests from concurrent games and risk the 500ms deadline.
+    app.run(host=host, port=port, threaded=True)
 
