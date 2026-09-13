@@ -4,8 +4,9 @@ __pycache__/
 *.exe
 starter_snake/
 
-# Local testing and verification fixtures
-competent_snake.py
-food_rusher_snake.py
-space_hog_snake.py
+# Local verification logs and visualizer artifacts
 *_verification_results.json
+game_output.json
+turns_processed.json
+visualizer.html
+scratch/
