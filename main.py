@@ -210,6 +210,57 @@ def get_turns_until_shrink(game_state: typing.Dict) -> int:
     return shrink_interval - turns_into_cycle if turns_into_cycle != 0 else shrink_interval
 
 
+def get_hazard_damage_per_turn(game_state: dict) -> int:
+    """Reads ruleset settings for hazard damage-per-turn (checks both a flat
+    'damagePerTurn' key and a nested {'royale': {'damagePerTurn': ...}} key).
+    Defaults to 15 if not present (PRD Section 6 flags the real figure as an
+    open question — default to the higher/more-conservative end)."""
+    ruleset = game_state.get("game", {}).get("ruleset", {})
+    if not ruleset and "ruleset" in game_state:
+        ruleset = game_state.get("ruleset", {})
+    settings = ruleset.get("settings", {}) if isinstance(ruleset, dict) else {}
+    if "damagePerTurn" in settings:
+        try:
+            return max(1, int(settings["damagePerTurn"]))
+        except (ValueError, TypeError):
+            pass
+    royale_settings = settings.get("royale", {})
+    if isinstance(royale_settings, dict) and "damagePerTurn" in royale_settings:
+        try:
+            return max(1, int(royale_settings["damagePerTurn"]))
+        except (ValueError, TypeError):
+            pass
+    return 15
+
+
+def bfs_distance_to_safe_tile(start_coord, hazard_coords, obstacles, board_width, board_height, max_search=None) -> float:
+    """BFS from start_coord to the nearest tile NOT in hazard_coords, routing
+    around obstacles (hazard tiles themselves are passable). Returns 0 if
+    start_coord is already safe, float('inf') if no safe tile is reachable
+    within max_search steps (defaults to board_width * board_height)."""
+    if start_coord not in hazard_coords:
+        return 0
+    if max_search is None:
+        max_search = board_width * board_height
+    visited = {start_coord}
+    queue = deque([(start_coord[0], start_coord[1], 0)])
+    while queue:
+        cx, cy, dist = queue.popleft()
+        if dist >= max_search:
+            continue
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nx, ny = cx + dx, cy + dy
+            coord = (nx, ny)
+            if 0 <= nx < board_width and 0 <= ny < board_height:
+                if coord not in obstacles and coord not in visited:
+                    if coord not in hazard_coords:
+                        return dist + 1
+                    visited.add(coord)
+                    queue.append((nx, ny, dist + 1))
+    return float("inf")
+
+
+
 # ---------------------------------------------------------
 # OPPONENT MODELING (PERSISTENT TRACKER)
 # ---------------------------------------------------------
@@ -1724,6 +1775,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
         for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]
     )
     is_safely_outside = (not is_in_hazard) and (not is_near_hazard)
+    hazard_damage_per_turn = get_hazard_damage_per_turn(game_state)
+    turns_survivable = my_health // hazard_damage_per_turn
 
     # Classify safe moves by hazard status
     non_hazard_moves = [
@@ -1804,12 +1857,28 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # Primary goal: Escape to safety! But an immediate food restores 100 health.
     # ---------------------------------------------------------
     if is_in_hazard:
+        exit_distance_by_move = {
+            m: bfs_distance_to_safe_tile(
+                (future_head_positions[m]["x"], future_head_positions[m]["y"]),
+                hazard_coords,
+                all_obstacles,
+                board_width,
+                board_height,
+            )
+            for m in post_h2h_moves
+        }
+        best_exit_distance = (
+            min(exit_distance_by_move.values())
+            if exit_distance_by_move
+            else float("inf")
+        )
+
         # Life-saver check: Eating food resets health to 100 and buys survival time
         immediate_food = [
             m for m in post_h2h_moves
             if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in all_food_coords
         ]
-        if immediate_food and my_health < 50:
+        if immediate_food and (my_health < 50 or turns_survivable <= best_exit_distance):
             best_move = max(immediate_food, key=move_preference_key)
             print(f"MOVE {game_state['turn']}: IN STORM (Health: {my_health}) - Life-saving food eaten with {best_move}!")
             return {"move": best_move}
@@ -1828,13 +1897,27 @@ def move(game_state: typing.Dict) -> typing.Dict:
             print(f"MOVE {game_state['turn']}: IN STORM (Health: {my_health}) - Escaping to safe zone with {best_move}")
             return {"move": best_move}
         else:
-            # All moves still in hazard: steer towards center to escape storm
-            best_move = min(
-                post_h2h_moves,
-                key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
-            )
-            print(f"MOVE {game_state['turn']}: DEEP IN STORM - Steering towards center with {best_move}")
-            return {"move": best_move}
+            finite_exit_moves = [
+                m for m in post_h2h_moves
+                if exit_distance_by_move.get(m, float("inf")) < float("inf")
+            ]
+            if finite_exit_moves:
+                min_exit_dist = min(exit_distance_by_move[m] for m in finite_exit_moves)
+                best_exit_moves = [
+                    m for m in finite_exit_moves
+                    if exit_distance_by_move[m] == min_exit_dist
+                ]
+                best_move = max(best_exit_moves, key=move_preference_key)
+                print(f"MOVE {game_state['turn']}: DEEP IN STORM - Moving toward safe zone with {best_move} (Exit distance: {min_exit_dist})")
+                return {"move": best_move}
+            else:
+                # All moves still in hazard: steer towards center to escape storm
+                best_move = min(
+                    post_h2h_moves,
+                    key=lambda m: get_coord_distance(future_head_positions[m], center_coord)
+                )
+                print(f"MOVE {game_state['turn']}: DEEP IN STORM - Steering towards center with {best_move}")
+                return {"move": best_move}
 
     # ---------------------------------------------------------
     # CASE 2: NEAR HAZARD (On the border of the storm)
@@ -1844,9 +1927,24 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # ---------------------------------------------------------
     if is_near_hazard:
         candidate_moves = list(non_hazard_moves)
+        exit_distance_by_hazard_move = {
+            m: bfs_distance_to_safe_tile(
+                (future_head_positions[m]["x"], future_head_positions[m]["y"]),
+                hazard_coords,
+                all_obstacles,
+                board_width,
+                board_height,
+            )
+            for m in hazard_moves
+        }
+        min_hazard_exit_distance = (
+            min(exit_distance_by_hazard_move.values())
+            if exit_distance_by_hazard_move
+            else float("inf")
+        )
 
         # Emergency starvation lifeline: If starving to death and food is on an adjacent hazard tile
-        if my_health <= 25:
+        if my_health <= 25 or turns_survivable <= min_hazard_exit_distance:
             hazard_food_moves = [
                 m for m in hazard_moves
                 if (future_head_positions[m]["x"], future_head_positions[m]["y"]) in all_food_coords
@@ -1857,7 +1955,15 @@ def move(game_state: typing.Dict) -> typing.Dict:
 
         # If all non-hazard moves were blocked, fall back to hazard moves heading to center
         if not candidate_moves:
-            candidate_moves = post_h2h_moves
+            if exit_distance_by_hazard_move:
+                min_exit = min(exit_distance_by_hazard_move.values())
+                candidate_moves = [
+                    m for m in hazard_moves
+                    if exit_distance_by_hazard_move[m] == min_exit
+                ]
+            else:
+                candidate_moves = post_h2h_moves
+
 
         # In 1v1 near storm, if healthy, dominate area control safely inside non-hazard using Iterative Minimax
         if is_1v1 and my_health > 35 and candidate_moves:
