@@ -500,13 +500,13 @@ def select_survival_mode_move(
 # ---------------------------------------------------------
 # DOMINANCE MODE HELPERS (Meaningful Length Advantage State)
 # ---------------------------------------------------------
-def check_dominance_mode(my_length: int, alive_opponents: typing.List[typing.Dict], margin: float = 2.0) -> bool:
+def check_dominance_mode(my_length: int, alive_opponents: typing.List[typing.Dict], margin: float = 1.7) -> bool:
     """
     Dominance Mode Trigger Condition:
     Calculates my snake's length vs. every alive opponent snake's length.
     Triggers if:
     1. My snake is the strictly longest (or tied longest) among all alive opponents, AND
-    2. My snake has a meaningful length margin (>= margin, default 2.0) over the average opponent.
+    2. My snake has a meaningful length margin (>= margin, default 1.7) over the average opponent.
     Returns False if no opponents are alive or upon any error.
     """
     try:
@@ -533,7 +533,7 @@ def check_opportunist_mode(my_length: int, alive_opponents: typing.List[typing.D
     """
     Opportunist Mode Trigger Condition:
     1. At least 3 snakes are still alive total (meaning len(alive_opponents) >= 2).
-    2. Neither Survival Mode (shortest or disadvantaged) nor Dominance Mode (longest with margin >= 2.0)
+    2. Neither Survival Mode (shortest or disadvantaged) nor Dominance Mode (longest with margin >= 1.7)
        is currently active.
     i.e. My snake is roughly mid-pack with no clear advantage yet.
     Returns False if fewer than 2 opponents are alive (drops to 1v1).
@@ -554,7 +554,7 @@ def determine_behavior_mode(my_length: int, alive_opponents: typing.List[typing.
     """
     Determines the active high-level behavior mode across all 4 states in priority order:
     1. SURVIVAL: Safety-critical (shortest or below average length by margin)
-    2. DOMINANCE: Meaningful length advantage (longest with >= 2.0 margin)
+    2. DOMINANCE: Meaningful length advantage (longest with >= 1.7 margin)
     3. OPPORTUNIST: 3+ snakes alive, mid-pack, third-party avoidance
     4. DEFAULT: 1v1 neutral duel or standard minimax
     Guarantees strict 4-way mutual exclusivity.
