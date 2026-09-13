@@ -274,6 +274,66 @@ def update_opponent_tracker(
         return False
 
 
+# HOLE #3 FIX: the naive-food-chaser detector above only ever ran for the
+# single 1v1 opponent, even though head-to-head prediction (the still-largest
+# cause of death in 4-snake play) needs exactly this signal the most -- right
+# now every equal-or-longer opponent gets treated as equally unpredictable,
+# marking all 4 cells around their head as dangerous regardless of whether
+# they're actually just going to beeline for the nearest food. This
+# generalizes the same tracking logic to every alive opponent by id, so a
+# detected-naive opponent's danger zone can be narrowed to their one
+# most-likely cell instead of all 4, freeing up real options elsewhere
+# without weakening safety against any opponent NOT flagged naive.
+OPPONENT_TRACKERS: typing.Dict[str, typing.Dict[str, typing.Any]] = {}
+
+
+def reset_opponent_trackers():
+    OPPONENT_TRACKERS.clear()
+
+
+def update_opponent_tracker_multi(
+    game_id: typing.Optional[str],
+    opp_id: str,
+    opp_head: typing.Optional[typing.Tuple[int, int]],
+    current_food: typing.Optional[typing.List[typing.Tuple[int, int]]],
+) -> bool:
+    """Same naive-food-chaser detection as update_opponent_tracker, but keyed
+    per opponent id so it works for every alive opponent, not just a single
+    1v1 duel partner. Fails safely back to False on any unexpected data."""
+    try:
+        if not opp_head or current_food is None:
+            return False
+
+        tracker = OPPONENT_TRACKERS.get(opp_id)
+        if tracker is None or tracker.get("game_id") != game_id:
+            tracker = {
+                "game_id": game_id,
+                "last_opp_head": None,
+                "last_food": [],
+                "recent_moves": deque(maxlen=5),
+            }
+            OPPONENT_TRACKERS[opp_id] = tracker
+
+        last_head = tracker["last_opp_head"]
+        last_food = tracker["last_food"]
+
+        if last_head is not None and last_food:
+            prev_min_dist = min(abs(last_head[0] - fx) + abs(last_head[1] - fy) for fx, fy in last_food)
+            new_min_dist = min(abs(opp_head[0] - fx) + abs(opp_head[1] - fy) for fx, fy in last_food)
+            moved_towards_food = (new_min_dist < prev_min_dist or opp_head in last_food)
+            tracker["recent_moves"].append(moved_towards_food)
+
+        tracker["last_opp_head"] = opp_head
+        tracker["last_food"] = list(current_food)
+
+        moves = list(tracker["recent_moves"])
+        if len(moves) >= 3 and (sum(moves) / len(moves)) >= 0.75:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------
 # PART 1: AREA-CONTROL SCORING FUNCTION WITH EDGE/CORNER WEIGHTING & HAZARD-TIMING BIAS
 # ---------------------------------------------------------
@@ -697,12 +757,14 @@ def info() -> typing.Dict:
 # start is called when your Battlesnake begins a game
 def start(game_state: typing.Dict):
     reset_opponent_tracker(game_state.get("game", {}).get("id"))
+    reset_opponent_trackers()
     print("GAME START")
 
 
 # end is called when your Battlesnake finishes a game
 def end(game_state: typing.Dict):
     reset_opponent_tracker()
+    reset_opponent_trackers()
     print("GAME OVER\n")
 
 
@@ -796,6 +858,43 @@ def move(game_state: typing.Dict) -> typing.Dict:
                         queue.append((nx, ny))
         return len(visited)
 
+    # FUNNEL-TRAP FIX: can we still loop back to our own tail from a given
+    # cell? A cell can look "spacious enough" (Phase 2 below) right now and
+    # still be a trap: as our body continues to fill in behind us each turn,
+    # a pocket with no path back to the tail strictly shrinks until we run
+    # out of room, even though the one-ply space count looked fine when we
+    # committed to it. This is the standard, well-established Battlesnake
+    # technique for catching that class of death (confirmed this session:
+    # "healthy-HP" collisions from a slowly-closing corridor the plain
+    # flood-fill count can't see coming). The tail cell itself is treated as
+    # passable, since it vacates by the time a full loop back around would
+    # reach it (approximate, but the standard assumption for this check).
+    def can_reach_own_tail(start_coord, tail_coord, obstacles):
+        """BFS from start_coord; True if tail_coord is reachable. Whether the
+        tail cell itself counts as passable is entirely up to the caller via
+        `obstacles` (exclude it to treat it as passable, include it to treat
+        it as a real permanent obstacle) -- no special-casing here, so this
+        gives the correct answer (always False) when the tail genuinely can't
+        be used, instead of a hard-coded shortcut that ignored `obstacles`."""
+        if start_coord == tail_coord:
+            return True
+        if start_coord in obstacles:
+            return False
+        visited = {start_coord}
+        queue = deque([start_coord])
+        while queue:
+            cx, cy = queue.popleft()
+            if (cx, cy) == tail_coord:
+                return True
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = cx + dx, cy + dy
+                coord = (nx, ny)
+                if 0 <= nx < board_width and 0 <= ny < board_height:
+                    if coord not in obstacles and coord not in visited:
+                        visited.add(coord)
+                        queue.append(coord)
+        return False
+
     # Collect only the moves that are 100% physically safe this turn
     safe_moves = [direction for direction, is_safe in is_move_safe.items() if is_safe]
 
@@ -864,6 +963,32 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # that lead into small shrinking pockets, even if food is in that pocket!
     candidate_moves = spacious_safe_moves if spacious_safe_moves else [max(safe_moves, key=lambda m: space_by_move[m])]
 
+    # FUNNEL-TRAP FIX: among the spacious candidates, further prefer ones that
+    # can still loop back to our own tail. A "spacious enough right now" cell
+    # can still be the first step into a pocket that closes over the next
+    # several turns as our body fills in behind us -- tail-reachability is
+    # what actually distinguishes a real, sustainable space from that trap.
+    #
+    # EDGE CASE: the tail is only actually passable if we didn't just eat --
+    # health resets to exactly 100 on the turn we eat, and a snake that just
+    # ate does NOT vacate its tail cell that turn (it grows instead). Treating
+    # the tail as passable in that specific case would be an over-optimistic
+    # answer to "is this really safe," the same class of error Bug #4 fixed
+    # in the opposite direction.
+    my_tail_coord = (my_body[-1]["x"], my_body[-1]["y"])
+    just_ate = game_state.get("you", {}).get("health", 100) == 100
+    obstacles_for_tail_check = all_obstacles if just_ate else (all_obstacles - {my_tail_coord})
+    tail_safe_moves = [
+        m for m in candidate_moves
+        if can_reach_own_tail(
+            (future_head_positions[m]["x"], future_head_positions[m]["y"]),
+            my_tail_coord,
+            obstacles_for_tail_check,
+        )
+    ]
+    if tail_safe_moves:
+        candidate_moves = tail_safe_moves
+
     # ---------------------------------------------------------
     # PHASE 3: HEAD-TO-HEAD COLLISION AVOIDANCE
     # If an opponent is equal or longer than us, avoid tiles they can move into!
@@ -871,6 +996,8 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # ---------------------------------------------------------
     dangerous_head_zones = set()
     my_id = game_state["you"].get("id")
+    current_game_id = game_state.get("game", {}).get("id")
+    food_coords_for_modeling = [(f["x"], f["y"]) for f in game_state.get("board", {}).get("food", [])]
 
     for opponent in opponents:
         if opponent.get("id") == my_id:
@@ -882,8 +1009,36 @@ def move(game_state: typing.Dict) -> typing.Dict:
 
         # If opponent is equal or longer than us, a head-on collision kills or ties us
         if opp_length >= my_length:
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                dangerous_head_zones.add((opp_head["x"] + dx, opp_head["y"] + dy))
+            # HOLE #3 FIX: an opponent detected as a naive/predictable food-
+            # chaser doesn't need all 4 neighbor cells treated as equally
+            # dangerous -- narrow it to just their one most-likely next cell
+            # (toward the nearest food) instead, freeing up the other 3 as
+            # real options. Any opponent not confidently flagged naive keeps
+            # the original, fully conservative treatment -- this only ever
+            # removes over-caution, never adds risk.
+            opp_id = opponent.get("id")
+            opp_head_coord = (opp_head["x"], opp_head["y"])
+            opp_is_naive_multi = (
+                opp_id is not None
+                and update_opponent_tracker_multi(current_game_id, opp_id, opp_head_coord, food_coords_for_modeling)
+            )
+
+            if opp_is_naive_multi and food_coords_for_modeling:
+                nearest_food = min(
+                    food_coords_for_modeling,
+                    key=lambda f: abs(opp_head["x"] - f[0]) + abs(opp_head["y"] - f[1]),
+                )
+                best_dir, best_dist = None, None
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = opp_head["x"] + dx, opp_head["y"] + dy
+                    dist = abs(nx - nearest_food[0]) + abs(ny - nearest_food[1])
+                    if best_dist is None or dist < best_dist:
+                        best_dist, best_dir = dist, (nx, ny)
+                dangerous_head_zones.add(best_dir)
+                print(f"MOVE {game_state['turn']}: OPPONENT MODELING -> {opp_id} is a naive food-seeker, narrowing their danger zone to 1 cell", flush=True)
+            else:
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    dangerous_head_zones.add((opp_head["x"] + dx, opp_head["y"] + dy))
 
     # Filter out moves that step into a larger/equal snake's strike zone
     h2h_safe_moves = [
