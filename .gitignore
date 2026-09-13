@@ -3,3 +3,9 @@
 __pycache__/
 *.exe
 starter_snake/
+
+# Local testing and verification fixtures
+competent_snake.py
+food_rusher_snake.py
+space_hog_snake.py
+*_verification_results.json
