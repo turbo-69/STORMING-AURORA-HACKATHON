@@ -1463,6 +1463,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
     # If an opponent is strictly shorter than us, it's safe/good to contest that tile.
     # ---------------------------------------------------------
     dangerous_head_zones = set()
+    opp_strike_zones = []
     my_id = game_state["you"].get("id")
     current_game_id = game_state.get("game", {}).get("id")
     food_coords_for_modeling = [(f["x"], f["y"]) for f in game_state.get("board", {}).get("food", [])]
@@ -1491,6 +1492,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
                 and update_opponent_tracker_multi(current_game_id, opp_id, opp_head_coord, food_coords_for_modeling)
             )
 
+            opp_zone = set()
             if opp_is_naive_multi and food_coords_for_modeling:
                 nearest_food = min(
                     food_coords_for_modeling,
@@ -1502,11 +1504,16 @@ def move(game_state: typing.Dict) -> typing.Dict:
                     dist = abs(nx - nearest_food[0]) + abs(ny - nearest_food[1])
                     if best_dist is None or dist < best_dist:
                         best_dist, best_dir = dist, (nx, ny)
-                dangerous_head_zones.add(best_dir)
+                if best_dir is not None:
+                    opp_zone.add(best_dir)
+                    dangerous_head_zones.add(best_dir)
                 print(f"MOVE {game_state['turn']}: OPPONENT MODELING -> {opp_id} is a naive food-seeker, narrowing their danger zone to 1 cell", flush=True)
             else:
                 for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                    dangerous_head_zones.add((opp_head["x"] + dx, opp_head["y"] + dy))
+                    coord = (opp_head["x"] + dx, opp_head["y"] + dy)
+                    opp_zone.add(coord)
+                    dangerous_head_zones.add(coord)
+            opp_strike_zones.append(opp_zone)
 
     # Filter out moves that step into a larger/equal snake's strike zone
     h2h_safe_moves = [
@@ -1515,8 +1522,45 @@ def move(game_state: typing.Dict) -> typing.Dict:
     ]
 
     # If we have moves that avoid head-on danger, strictly use those!
-    # (If all moves are threatened, fall back to candidate_moves and hope opponent turns away)
-    post_h2h_moves = h2h_safe_moves if h2h_safe_moves else candidate_moves
+    if h2h_safe_moves:
+        post_h2h_moves = h2h_safe_moves
+    elif candidate_moves:
+        # Fallback tier: every candidate move steps into at least one opponent's strike zone.
+        # Instead of falling back blindly and hoping the opponent turns away, score each move by:
+        # 1. How many distinct equal-or-longer opponents could kill us there (fewer is better)
+        # 2. Among ties, prefer the move that leaves the MOST reachable open space afterward
+        h2h_killer_counts = {}
+        for m in candidate_moves:
+            cand_coord = (future_head_positions[m]["x"], future_head_positions[m]["y"])
+            h2h_killer_counts[m] = sum(1 for zone in opp_strike_zones if cand_coord in zone)
+
+        min_killers = min(h2h_killer_counts.values()) if h2h_killer_counts else 0
+        min_killer_moves = [m for m in candidate_moves if h2h_killer_counts[m] == min_killers]
+
+        if len(min_killer_moves) == 1:
+            post_h2h_moves = min_killer_moves
+        elif min_killer_moves:
+            # Tiebreak by reachable space
+            max_space = max(
+                space_by_move.get(m, count_reachable_space(future_head_positions[m]))
+                for m in min_killer_moves
+            )
+            best_space_moves = [
+                m for m in min_killer_moves
+                if space_by_move.get(m, count_reachable_space(future_head_positions[m])) == max_space
+            ]
+            post_h2h_moves = best_space_moves if best_space_moves else min_killer_moves
+        else:
+            post_h2h_moves = candidate_moves
+
+        print(
+            f"MOVE {game_state.get('turn', 0)}: H2H FALLBACK -> all moves threatened! "
+            f"Filtered candidates to {post_h2h_moves} "
+            f"(min_killers={min_killers}, evaluated {len(candidate_moves)} moves)",
+            flush=True,
+        )
+    else:
+        post_h2h_moves = candidate_moves
 
     hazards = game_state.get("board", {}).get("hazards", [])
     hazard_coords = {(h["x"], h["y"]) for h in hazards}
