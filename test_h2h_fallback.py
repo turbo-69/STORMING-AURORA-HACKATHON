@@ -271,5 +271,16 @@ class TestH2HFallbackLogic(unittest.TestCase):
         self.assertIn(res["move"], ["up", "right"])
 
 
+class TestInfoEndpoint(unittest.TestCase):
+    def test_info_metadata(self):
+        from main import info
+        res = info()
+        self.assertEqual(res.get("apiversion"), "1")
+        self.assertEqual(res.get("author"), "turbo-69")
+        self.assertNotEqual(res.get("color"), "#888888")
+        self.assertNotEqual(res.get("head"), "default")
+        self.assertNotEqual(res.get("tail"), "default")
+
+
 if __name__ == "__main__":
     unittest.main()
